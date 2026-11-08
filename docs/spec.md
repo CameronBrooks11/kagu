@@ -46,10 +46,10 @@ flowchart TB
   RA <-- "permission request · allow, deny, ask" --> POL
   RA <-- "ACP v1 over stdio" --> W
   W --> MCP
-  RA -- "turn ended" --> CHK
+  RA -- "end_turn" --> CHK
   CHK -- spawn --> CK
+  CHK -- verdict --> RA
   RA -- append --> LOG
-  CHK -- append --> LOG
   LOG --> PRJ
   LOG -- tail --> API
   W -- egress --> PX
@@ -65,7 +65,7 @@ flowchart TB
 | Task    | Immutable intent: profile name, input, workspace, checks                 | until deleted   |
 | Run     | One attempt at a task by one worker, bound to its resolved configuration | to a terminal state |
 | Event   | Append-only record of something that happened to a run                   | forever         |
-| Grant   | Authority a run's worker holds, enforced outside the worker              | one run         |
+| Grant   | Authority a run's worker holds; credentials by reference, never by value | one run         |
 | Check   | Command whose exit status contributes to the run's verdict               | one run         |
 
 A retry is a new Run of the same Task. A harness's own session id is a field
@@ -77,7 +77,9 @@ questions).
 1. **Log first.** Every state change is an appended Event before it takes
    effect. Run state is a fold over its Events; every other table is a
    projection and can be rebuilt.
-2. **Single writer.** Exactly one host task mutates a given Run.
+2. **Single writer.** Only a Run's actor appends its Events. Admission,
+   checks, policy and clients send it messages. A terminal Run's actor is
+   revived on demand to record release, recovery or purge.
 3. **At most once.** kagu never starts agent work again on its own. A run
    that ends, for any reason, stays ended; continuing is a new Run started by
    a command. This bounds what kagu starts, not what a worker did: effects
@@ -87,15 +89,16 @@ questions).
 5. **Bound at admission.** A Run executes the configuration resolved when it
    was admitted. Later edits to a Profile do not reach it.
 6. **Authority is what the process can reach.** A worker's authority is
-   everything its process tree can reach, not what the Grant lists. Each
-   grant field is reported `enforced`, `advisory` or `unsupported`; only
-   `enforced` is a guarantee.
-7. **Fail closed.** A run whose profile requires an enforcement the host
-   cannot provide is `rejected` at admission.
+   everything its process tree can reach, not what the Grant lists. Every
+   setting is reported at one of the levels under
+   [Enforcement levels](#enforcement-levels); only `enforced` is a guarantee.
+7. **Fail closed.** A run whose profile requires a level the host or
+   adapter cannot provide for a setting is `rejected` at admission.
 8. **One writer per workspace.** At most one non-terminal run holds write
    access to a path, compared by canonical real path, with an ancestor or
-   descendant counting as the same path. The lock is a projection of
-   non-terminal runs, so it cannot outlive its run.
+   descendant counting as the same path. A lock is held from admission
+   until the run is terminal **and** its process tree is confirmed gone
+   (see [Release](#release)); a terminal run alone does not free it.
 9. **Observed, not invented.** Every worker exit the host observes is an
    Event. A run whose end the host did not observe becomes `interrupted`;
    no exit is recorded for it.
@@ -105,6 +108,9 @@ questions).
     and the client API work with every model provider unreachable.
 12. **Clients are not load-bearing.** Everything a client does is a
     documented call. Deleting every client loses no state.
+13. **No secret values at rest.** Credential values never enter the
+    resolved configuration or the log. Profiles and Grants name secrets by
+    reference; the host resolves them only when starting a process.
 
 ## Run lifecycle
 
@@ -113,18 +119,37 @@ State names follow A2A task states, plus `interrupted`.
 ```mermaid
 stateDiagram-v2
   [*] --> submitted
-  submitted --> rejected: grant unenforceable / workspace held
+  submitted --> rejected: required level unmet / workspace held
   submitted --> working: worker started
   working --> input_required: permission or elicitation unresolved by policy
   input_required --> working: decision
-  working --> checking: worker ends turn
-  working --> failed: worker exits or reports an error
+  working --> checking: stop reason end_turn
+  working --> failed: other stop reason, error or exit
   input_required --> failed: worker exits
   checking --> completed: verdict recorded
 ```
 
 Not drawn: every non-terminal state goes to `canceled` on `run.cancel`, and
 to `interrupted` on host recovery.
+
+A Run sends one ACP `session/prompt`. Its response ends execution:
+
+| Response                         | Next state  | Reason recorded       |
+| -------------------------------- | ----------- | --------------------- |
+| `end_turn`                       | `checking`  |                       |
+| `cancelled` after `run.cancel`   | `canceled`  |                       |
+| `cancelled` without `run.cancel` | `failed`    | `unrequested_cancel`  |
+| `max_tokens`                     | `failed`    | `limit`               |
+| `max_turn_requests`              | `failed`    | `limit`               |
+| `refusal`                        | `failed`    | `refusal`             |
+| any other stop reason            | `failed`    | `unknown_stop_reason` |
+| JSON-RPC error                   | `failed`    | `error`               |
+| worker exits before responding   | `failed`    | `exited`              |
+
+`end_turn` means only that execution finished; whether the result is good
+is the verdict. On `run.cancel` the actor sends `session/cancel`, answers
+pending permission requests with `cancelled`, and kills the process tree if
+no response arrives within the profile's grace period.
 
 **Execution and verification are separate.** The state says how execution
 ended. The verdict says whether its result was checked:
@@ -149,12 +174,24 @@ substrate `none` there is no containment: the `process_tree` field is
 Event with `source: "host"` and moves to `interrupted`. The worker's
 effects up to that point are unknown.
 
+### Release
+
+The actor records the root process at start (pid and start time) and
+appends `run.released` once the whole tree is confirmed gone:
+
+- **Contained** (`process_tree` enforced): the root's exit, observed or
+  found on recovery by pid and start time, ends the namespace and every
+  descendant. Release follows.
+- **Not contained:** descendants cannot be accounted for. The lock stays
+  held until a client calls `workspace.release`, recorded with
+  `source: "client"` as an attestation, not an observation.
+
 ## Admission
 
-Admission resolves the Task's profile and records a `run.admitted` Event
-holding the resolved configuration: profile name and content digest, worker
-command, effective grant with each field's level, checks, protected paths
-with their digests. When the worker starts, its name and version from ACP
+Admission resolves the Task's profile and hands the result to the new
+Run's actor, which records it as `run.admitted`: profile name and content digest, worker
+command, effective grant, the level of every setting, checks, protected
+paths with their digests. Credentials appear as references. When the worker starts, its name and version from ACP
 `initialize` are recorded.
 
 ## Checks
@@ -180,7 +217,7 @@ verdict is `fail`.
 - `source`: `host`, `worker` or `client`. Events the host infers are
   `host`, never `worker`.
 - `type` + `v`: the data schema. Readers upcast old versions; stored
-  history is never rewritten.
+  history is never rewritten, only purged (below).
 
 Worker output is recorded as `worker.update`, whose data is the ACP v1
 `SessionUpdate` unmodified. ACP is the presentation vocabulary: a client
@@ -188,22 +225,41 @@ needs no harness-specific knowledge to render a run. Anything outside ACP
 (adapter `_meta`, frames from a native driver) is stored opaque as
 `worker.raw`, for diagnostics.
 
-Storage: one SQLite database in WAL mode. Events are insert-only.
+Before append, the actor replaces every credential value it injected into
+the run with its reference. Secrets the worker obtained some other way
+cannot be recognised and are not redacted; the grant is what keeps them out
+of reach.
+
+Storage: one SQLite database in WAL mode, `secure_delete` on. Events are
+insert-only, except purge: `run.purge`, or the host's retention age for
+terminal runs (default: keep), deletes a released run's Events and leaves
+one `run.purged` Event. A replaying client sees the deleted `seq` values
+as gaps.
 
 ## Grant
 
 A Grant is data: filesystem paths (`ro` | `rw`), egress allow-list,
-environment and credentials passed in, resource limits. The host compiles it
-to a substrate and reports each field's level per run:
+environment and credential references, resource limits. The host compiles it
+to a substrate.
 
-- `enforced`: the substrate prevents a violation.
-- `advisory`: only the worker is asked to comply, through harness settings
-  or ACP permission requests.
-- `unsupported`: nothing applies.
+### Enforcement levels
+
+Every Profile setting, grant fields and worker settings alike (model, mode,
+instructions, MCP servers), is reported at one level per run:
+
+| Level         | Meaning                                                                 |
+| ------------- | ----------------------------------------------------------------------- |
+| `enforced`    | the host prevents a violation through the substrate                     |
+| `supported`   | the adapter declares it applies the setting, and the conformance suite tests that it does; not a security boundary |
+| `advisory`    | passed to the worker; compliance is neither enforced nor tested        |
+| `unsupported` | cannot be passed or applied                                             |
+
+A Profile may mark a setting `required: <level>`. Admission rejects the run
+if the setting's level is lower. Only grant fields can be `enforced`.
 
 | Substrate        | filesystem  | network                                       | credentials                    | process tree |
 | ---------------- | ----------- | --------------------------------------------- | ------------------------------ | ------------ |
-| `none`           | advisory or unsupported | advisory or unsupported           | unsupported                    | unsupported  |
+| `none`           | supported, advisory or unsupported | supported, advisory or unsupported | unsupported                    | unsupported  |
 | `bwrap+landlock` | enforced    | enforced: no network at all                   | enforced: env cleared, only granted paths mounted | enforced |
 | `srt`            | enforced    | enforced: allow-listed domains through a host proxy, direct network removed | enforced | enforced |
 | `vm`             | later       |                                               |                                |              |
@@ -227,19 +283,22 @@ requests reach clients, and the first decision recorded wins.
 | traces          | OpenTelemetry GenAI, pinned semconv version | a projection of the log |
 
 Client methods: `task.submit`, `run.start`, `run.cancel`, `request.decide`,
-`log.subscribe`, `log.read`, `profile.list`, `host.status`.
+`workspace.release`, `run.purge`, `log.subscribe`, `log.read`,
+`profile.list`, `host.status`.
 
 `log.subscribe { after? }` reads a snapshot of non-terminal runs and the
 highest committed `seq` in one read transaction, returns both, then streams
 every Event with a greater `seq`. Nothing committed after the snapshot is
 missed or sent twice. A reconnecting client passes its cursor as `after`;
-the log is never truncated, so replay is always possible.
+replay is always possible; purged runs appear as gaps.
 
 ## Adapter conformance
 
 Each adapter declares the ACP features it supports (resume, cancel,
-permission requests, elicitation) and is tested against them by a shared
-suite. A run that needs an undeclared feature is `rejected`.
+permission requests, elicitation) and the settings it applies, and is tested
+against them by a shared suite. A declared setting that passes the suite is
+`supported`; one passed without a test is `advisory`. A run that needs an
+undeclared feature is `rejected`.
 
 ## Open questions
 
