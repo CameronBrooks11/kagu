@@ -5,8 +5,8 @@ combination of four properties:
 
 1. small headless core
 2. versioned, durable, seq-replayable event log as the public contract
-3. enforcement labelled per field as `enforced` or `advisory`
-4. completion decided by checks
+3. enforcement labelled per field as `enforced`, `advisory` or `unsupported`
+4. verification by checks, recorded apart from completion
 
 | Project | 1 | 2 | 3 | 4 |
 | ------- | - | - | - | - |
@@ -26,11 +26,10 @@ model. coder/agentapi (PTY scraping) is deprecated.
 
 - **AHP** (Microsoft): snapshot + `seq` + reconnect sync model for clients.
 - **A2A**: run state names.
-- **Rivet**: envelope fields `source` and `synthetic` (event made by the
-  host, not reported by the worker), and opaque `raw` — candidates for the
-  kagu envelope.
-- **claw-orchestrator**: three-valued check verdict; editing the files a
-  check runs counts as refuting it.
+- **Rivet**: envelope field `source` (an event the host made is never
+  attributed to the worker) and opaque raw frames.
+- **claw-orchestrator**: a verdict separate from completion; editing the
+  files a check runs counts as refuting it (protected paths).
 - **Omnigent**: credential proxy that injects secrets at egress rather than
   into the worker's environment — reference for the `srt` grant substrate.
 - **OpenHands SDK**: immutable configuration plus append-only event log.
