@@ -11,19 +11,49 @@ kagu does not implement an agent loop, call a model, implement tools, or route
 work between models. A minimal native loop is a worker like any other.
 
 ```mermaid
-flowchart LR
-  C["clients<br/>CLI · web · curl"] -- "JSON-RPC 2.0<br/>unix socket" --> H
+flowchart TB
+  C["clients · CLI, web, curl"]
+  CFG[/"profiles · config files"/]
+
   subgraph H [kagu host]
-    direction TB
-    P[policy] --- S[supervisor]
-    S --- L[(event log)]
-    K[checks] --- L
+    API["client API · JSON-RPC 2.0, unix socket"]
+    ADM["admission · resolve profile, compile grant, lock workspace"]
+    POL["policy"]
+    RA["run actor · one per run, sole writer"]
+    CHK["check runner"]
+    LOG[("event log · SQLite WAL, insert-only")]
+    PRJ["projections · run table, OTel traces"]
   end
-  H -- "ACP v1<br/>stdio" --> W
-  subgraph G [grant: sandbox · egress proxy · scoped credentials]
-    W["worker<br/>Claude · Codex · OpenCode · native"]
+
+  subgraph G ["run grant · OS sandbox, scoped credentials"]
+    W["worker · ACP harness, or adapter + harness"]
+    MCP["stdio MCP servers"]
   end
-  W -- MCP --> T[tools]
+
+  subgraph GC ["check sandbox · grant TBD"]
+    CK["check process"]
+  end
+
+  PX["egress proxy · allow-list"]
+  NET(["internet · model APIs, remote MCP"])
+
+  C <-- "commands · snapshot + events from seq" --> API
+  CFG --> ADM
+  API -- "submit, start" --> ADM
+  API -- "cancel, decide" --> RA
+  ADM -- "admitted" --> RA
+  RA <-- "permission request · allow, deny, ask" --> POL
+  RA <-- "ACP v1 over stdio" --> W
+  W --> MCP
+  RA -- "turn ended" --> CHK
+  CHK -- spawn --> CK
+  RA -- append --> LOG
+  CHK -- append --> LOG
+  LOG --> PRJ
+  LOG -- tail --> API
+  W -- egress --> PX
+  MCP --> PX
+  PX --> NET
 ```
 
 ## Model
