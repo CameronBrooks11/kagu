@@ -5,7 +5,7 @@ combination of four properties:
 
 1. small headless core
 2. versioned, durable, seq-replayable event log as the public contract
-3. enforcement labelled per field as `enforced`, `advisory` or `unsupported`
+3. every setting labelled `enforced`, `supported`, `advisory` or `unsupported`
 4. verification by checks, recorded apart from completion
 
 | Project | 1 | 2 | 3 | 4 |

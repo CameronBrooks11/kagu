@@ -50,7 +50,9 @@ ACP is a published standard every worker speaks, so it serves as the
 presentation vocabulary without kagu inventing one; harness-native formats
 change, and a schema that mirrored them would age with them. SQLite gives
 crash-safe appends and queries without a server. Gapless numbering is not
-needed for resume, only a total order.
+needed for resume, only a total order, which also lets purge delete a run's
+Events. Credential values are never written: references only, and injected
+values are redacted from worker output before append.
 
 Rejected: harness transcripts as the data model; a kagu-specific agent event
 taxonomy; JSONL as primary store (no atomic multi-record writes, no index); a
@@ -81,8 +83,9 @@ Rejected: declaring tasks as desired state.
 ## 7. Enforcement only outside the worker
 
 Grants compile to an OS sandbox, an egress proxy and withheld credentials.
-Each field is labelled `enforced`, `advisory` (the worker is asked) or
-`unsupported` (nothing applies), per run. A worker's authority is whatever
+Every setting is labelled `enforced` (the substrate prevents violation),
+`supported` (the adapter applies it, conformance-tested), `advisory` (passed,
+untested) or `unsupported`, per run; a profile can require a minimum level. A worker's authority is whatever
 its process tree can reach, not what the Grant lists.
 
 Why: a harness's permission rules are enforced by the process being
@@ -91,8 +94,9 @@ worker that misbehaves. Saying so in the data is what makes the rest
 trustworthy.
 
 Rejected: presenting configured permissions as enforced; a single uniform
-"policy" claim across adapters; a two-level scale, which reports a missing
-mechanism the same as a deliberate request.
+"policy" claim across adapters; a scale that reports a missing mechanism the
+same as a deliberate request, or a tested adapter setting the same as an
+untested one.
 
 ## 8. Checks decide verification
 
