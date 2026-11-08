@@ -11,7 +11,7 @@ wanted, is a separate ACP worker.
 Why: harness design churns monthly and the vendors out-build any third
 party on it. Run lifecycle, confinement and record-keeping do not churn, and
 no harness owns them across vendors. Keeping models out of the core makes
-invariant 9 true by construction.
+invariant 11 true by construction.
 
 Rejected: a built-in loop in the core binary.
 
@@ -41,26 +41,32 @@ varlink, Cap'n Proto (weight or ecosystem without benefit here).
 
 ## 4. The event log is the contract
 
-Append-only, versioned envelope, host-wide `seq`, raw harness frames stored
-opaque. SQLite in WAL mode.
+Append-only, versioned envelope, host-wide `seq` (ordered, gaps allowed).
+Worker output is stored as ACP `SessionUpdate`, unmodified; anything outside
+ACP is stored opaque. SQLite in WAL mode.
 
 Why: replay, audit, client resume and every projection fall out of one log.
-Harness output formats change; a schema that mirrored them would age with
-them. SQLite gives crash-safe appends and queries without a server.
+ACP is a published standard every worker speaks, so it serves as the
+presentation vocabulary without kagu inventing one; harness-native formats
+change, and a schema that mirrored them would age with them. SQLite gives
+crash-safe appends and queries without a server. Gapless numbering is not
+needed for resume, only a total order.
 
-Rejected: harness transcripts as the data model; JSONL as primary store (no
-atomic multi-record writes, no index); a full CQRS framework.
+Rejected: harness transcripts as the data model; a kagu-specific agent event
+taxonomy; JSONL as primary store (no atomic multi-record writes, no index); a
+full CQRS framework.
 
 ## 5. Actors, not replay
 
-A run is a single-writer actor with a log. Recovery ends the run; continuing
-is a new Run.
+A run is a single-writer actor with a log. Recovery ends the run as
+`interrupted`, outcome unknown; continuing is a new Run.
 
 Why: deterministic replay (Temporal and kin) needs deterministic code. A
 harness turn is one large non-deterministic, side-effecting step, so replay
 recovers nothing and re-execution repeats side effects.
 
-Rejected: durable-execution replay of agent work; automatic retry.
+Rejected: durable-execution replay of agent work; automatic retry;
+recording an exit the host never observed.
 
 ## 6. Commands for work, reconciliation for resources
 
@@ -75,7 +81,9 @@ Rejected: declaring tasks as desired state.
 ## 7. Enforcement only outside the worker
 
 Grants compile to an OS sandbox, an egress proxy and withheld credentials.
-Everything else is labelled advisory, per field, per run.
+Each field is labelled `enforced`, `advisory` (the worker is asked) or
+`unsupported` (nothing applies), per run. A worker's authority is whatever
+its process tree can reach, not what the Grant lists.
 
 Why: a harness's permission rules are enforced by the process being
 confined. Only the kernel, the proxy and absent credentials hold against a
@@ -83,17 +91,23 @@ worker that misbehaves. Saying so in the data is what makes the rest
 trustworthy.
 
 Rejected: presenting configured permissions as enforced; a single uniform
-"policy" claim across adapters.
+"policy" claim across adapters; a two-level scale, which reports a missing
+mechanism the same as a deliberate request.
 
-## 8. Checks decide completion
+## 8. Checks decide verification
 
-A run completes when its checks pass, not when the worker says it is done.
-Unknown is a failure.
+Execution state and verdict are separate. The state says how execution
+ended; the verdict (`pass`, `fail`, `error`, `not_run`) says whether the
+result was checked. Checks run under their own grant, with the workspace
+read-only.
 
-Why: agents report success they have not achieved; mechanical checks beat
-prose instructions.
+Why: agents report success they have not achieved, and mechanical checks
+beat prose instructions. Some work (research, conversation, design) has no
+mechanical check; it can complete without being reported as verified. A
+check under the worker's grant could be altered by the worker it judges.
 
-Rejected: agent self-report as the terminal signal.
+Rejected: agent self-report as verification; folding the verdict into the
+terminal state; checks under the worker's grant.
 
 ## 9. Not in v1
 

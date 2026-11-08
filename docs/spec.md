@@ -5,7 +5,8 @@ Draft. Normative words (MUST, MUST NOT, SHOULD) per RFC 2119.
 ## Scope
 
 kagu is a host. It accepts tasks, starts harnesses as worker processes,
-confines them, records everything they report, and decides when a run is done.
+confines them, records what they report, and records whether their result
+was verified.
 
 kagu does not implement an agent loop, call a model, implement tools, or route
 work between models. A minimal native loop is a worker like any other.
@@ -30,7 +31,7 @@ flowchart TB
     MCP["stdio MCP servers"]
   end
 
-  subgraph GC ["check sandbox · grant TBD"]
+  subgraph GC ["check grant · workspace read-only"]
     CK["check process"]
   end
 
@@ -61,14 +62,15 @@ flowchart TB
 | Noun    | Is                                                                      | Lifetime        |
 | ------- | ----------------------------------------------------------------------- | --------------- |
 | Profile | Configured worker: harness command, instructions, model hint, grant, checks | config, versioned |
-| Task    | Immutable intent: profile, input, workspace, checks                      | until deleted   |
-| Run     | One attempt at a task by one worker process                              | to a terminal state |
+| Task    | Immutable intent: profile name, input, workspace, checks                 | until deleted   |
+| Run     | One attempt at a task by one worker, bound to its resolved configuration | to a terminal state |
 | Event   | Append-only record of something that happened to a run                   | forever         |
 | Grant   | Authority a run's worker holds, enforced outside the worker              | one run         |
-| Check   | Command whose exit status decides whether a run succeeded                | one run         |
+| Check   | Command whose exit status contributes to the run's verdict               | one run         |
 
 A retry is a new Run of the same Task. A harness's own session id is a field
-of the Run, used to resume; kagu has no session object of its own.
+of the Run, used to resume; kagu has no session object of its own (see open
+questions).
 
 ## Invariants
 
@@ -76,27 +78,37 @@ of the Run, used to resume; kagu has no session object of its own.
    effect. Run state is a fold over its Events; every other table is a
    projection and can be rebuilt.
 2. **Single writer.** Exactly one host task mutates a given Run.
-3. **At most once.** kagu never re-executes agent work on its own. A crash,
-   timeout or failed check ends the run; continuing is a new Run started by a
-   command.
-4. **Terminal is final.** `completed`, `failed`, `canceled` and `rejected`
-   have no outgoing transitions.
-5. **No authority beyond the grant.** A worker holds only what its Grant
-   gives it. A grant field the host cannot enforce on this machine is
-   reported `advisory`, never `enforced`.
-6. **Fail closed.** A run whose profile requires an enforcement the host
+3. **At most once.** kagu never starts agent work again on its own. A run
+   that ends, for any reason, stays ended; continuing is a new Run started by
+   a command. This bounds what kagu starts, not what a worker did: effects
+   made before a crash may be partial and unrecorded.
+4. **Terminal is final.** `completed`, `failed`, `canceled`, `rejected` and
+   `interrupted` have no outgoing transitions.
+5. **Bound at admission.** A Run executes the configuration resolved when it
+   was admitted. Later edits to a Profile do not reach it.
+6. **Authority is what the process can reach.** A worker's authority is
+   everything its process tree can reach, not what the Grant lists. Each
+   grant field is reported `enforced`, `advisory` or `unsupported`; only
+   `enforced` is a guarantee.
+7. **Fail closed.** A run whose profile requires an enforcement the host
    cannot provide is `rejected` at admission.
-7. **One writer per workspace.** At most one non-terminal run holds write
-   access to a given path.
-8. **Every exit is an event.** Worker death, by any cause, is recorded.
-9. **No model in the control path.** Admission, supervision, policy, checks
-   and the client API work with every model provider unreachable.
-10. **Clients are not load-bearing.** Everything a client does is a
+8. **One writer per workspace.** At most one non-terminal run holds write
+   access to a path, compared by canonical real path, with an ancestor or
+   descendant counting as the same path. The lock is a projection of
+   non-terminal runs, so it cannot outlive its run.
+9. **Observed, not invented.** Every worker exit the host observes is an
+   Event. A run whose end the host did not observe becomes `interrupted`;
+   no exit is recorded for it.
+10. **Verified means checked.** A verdict of `pass` requires every declared
+    check to have run and exited `0`.
+11. **No model in the control path.** Admission, supervision, policy, checks
+    and the client API work with every model provider unreachable.
+12. **Clients are not load-bearing.** Everything a client does is a
     documented call. Deleting every client loses no state.
 
 ## Run lifecycle
 
-State names follow A2A task states.
+State names follow A2A task states, plus `interrupted`.
 
 ```mermaid
 stateDiagram-v2
@@ -105,37 +117,76 @@ stateDiagram-v2
   submitted --> working: worker started
   working --> input_required: permission or elicitation unresolved by policy
   input_required --> working: decision
-  input_required --> failed: worker exits / host restarts
   working --> checking: worker ends turn
-  checking --> completed: all checks pass
-  checking --> failed: a check fails or errors
-  working --> failed: worker exits / host restarts
-  submitted --> canceled
-  working --> canceled
-  input_required --> canceled
-  checking --> canceled
+  working --> failed: worker exits or reports an error
+  input_required --> failed: worker exits
+  checking --> completed: verdict recorded
 ```
 
-A run with no checks goes from `checking` straight to `completed`, and the
-Run records that no checks ran. A check exits `0` for pass and `1` for fail;
-any other result is an error and fails the run. Unknown is never a pass.
+Not drawn: every non-terminal state goes to `canceled` on `run.cancel`, and
+to `interrupted` on host recovery.
 
-Workers die with the host. On host start, every non-terminal Run gets a
-`host.restarted` Event and moves to `failed` (invariants 3, 8).
+**Execution and verification are separate.** The state says how execution
+ended. The verdict says whether its result was checked:
+
+| Verdict   | Meaning                                                   |
+| --------- | --------------------------------------------------------- |
+| `pass`    | every check ran and exited `0`                            |
+| `fail`    | a check exited `1`, or a protected path changed           |
+| `error`   | a check could not run, timed out, or exited otherwise     |
+| `not_run` | no checks declared, or the run never reached `checking`  |
+
+`fail` takes precedence over `error`, and `error` over `pass`. A `completed`
+run with verdict `not_run` executed to the end and was not verified.
+
+**Containment.** The host kills a run's whole process tree on cancel,
+failure or host shutdown, through the substrate's containment (a PID
+namespace under bwrap). Under
+substrate `none` there is no containment: the `process_tree` field is
+`unsupported` and descendants may outlive the host.
+
+**Recovery.** On host start, each non-terminal Run gets a `run.interrupted`
+Event with `source: "host"` and moves to `interrupted`. The worker's
+effects up to that point are unknown.
+
+## Admission
+
+Admission resolves the Task's profile and records a `run.admitted` Event
+holding the resolved configuration: profile name and content digest, worker
+command, effective grant with each field's level, checks, protected paths
+with their digests. When the worker starts, its name and version from ACP
+`initialize` are recorded.
+
+## Checks
+
+Checks run after the worker ends its turn, under their own grant: workspace
+read-only, none of the worker's credentials, network only as the check
+declares. They never run under the worker's grant.
+
+Files a check reads from the workspace were writable by the worker, so a
+verdict is only as independent as its inputs. A Task may list protected
+paths, such as the tests a check runs; if any changed during the run, the
+verdict is `fail`.
 
 ## Event envelope
 
 ```json
 { "seq": 4182, "run": "r_01J…", "ts": "2026-11-08T16:02:11.413Z",
-  "type": "run.state", "v": 1, "data": { "to": "working" } }
+  "source": "worker", "type": "worker.update", "v": 1, "data": { … } }
 ```
 
-- `seq`: host-wide, gapless, strictly increasing. Clients resume from it.
+- `seq`: host-wide, strictly increasing, assigned at commit. Gaps are
+  allowed. A client's cursor is the last `seq` it processed.
+- `source`: `host`, `worker` or `client`. Events the host infers are
+  `host`, never `worker`.
 - `type` + `v`: the data schema. Readers upcast old versions; stored
   history is never rewritten.
-- Raw harness frames (ACP `session/update` payloads and anything
-  harness-native) are stored unparsed and referenced by `type: "worker.frame"`
-  Events. kagu's own types never mirror a harness's format.
+
+Worker output is recorded as `worker.update`, whose data is the ACP v1
+`SessionUpdate` unmodified. ACP is the presentation vocabulary: a client
+needs no harness-specific knowledge to render a run. Anything outside ACP
+(adapter `_meta`, frames from a native driver) is stored opaque as
+`worker.raw`, for diagnostics.
 
 Storage: one SQLite database in WAL mode. Events are insert-only.
 
@@ -143,23 +194,28 @@ Storage: one SQLite database in WAL mode. Events are insert-only.
 
 A Grant is data: filesystem paths (`ro` | `rw`), egress allow-list,
 environment and credentials passed in, resource limits. The host compiles it
-to a substrate profile:
+to a substrate and reports each field's level per run:
 
-| Substrate        | Enforces                                                 |
-| ---------------- | -------------------------------------------------------- |
-| `none`           | nothing; every field is `advisory`                       |
-| `bwrap+landlock` | filesystem view, no network namespace, rlimits          |
-| `srt`            | as above, plus domain allow-list through a host proxy   |
-| `vm`             | later                                                    |
+- `enforced`: the substrate prevents a violation.
+- `advisory`: only the worker is asked to comply, through harness settings
+  or ACP permission requests.
+- `unsupported`: nothing applies.
 
-The host probes the substrate at start (for Landlock, its ABI version) and
-reports each field's level per run: `enforced` | `advisory`. Credentials not
-passed in are not reachable, whatever the substrate.
+| Substrate        | filesystem  | network                                       | credentials                    | process tree |
+| ---------------- | ----------- | --------------------------------------------- | ------------------------------ | ------------ |
+| `none`           | advisory or unsupported | advisory or unsupported           | unsupported                    | unsupported  |
+| `bwrap+landlock` | enforced    | enforced: no network at all                   | enforced: env cleared, only granted paths mounted | enforced |
+| `srt`            | enforced    | enforced: allow-listed domains through a host proxy, direct network removed | enforced | enforced |
+| `vm`             | later       |                                               |                                |              |
 
-Harness-side permission settings and ACP `session/request_permission` are
-**advisory**: the confined program decides whether to ask. kagu still
-answers them, from policy first; only unresolved requests reach clients, and
-the first decision recorded wins.
+A domain allow-list is enforced only while the worker has no route out
+other than the proxy. The host probes the substrate at start (for Landlock,
+its ABI version); a documented gap in the substrate downgrades the affected
+field.
+
+ACP `session/request_permission` is advisory: the confined program decides
+whether to ask. kagu still answers, from policy first; only unresolved
+requests reach clients, and the first decision recorded wins.
 
 ## Protocols
 
@@ -173,10 +229,11 @@ the first decision recorded wins.
 Client methods: `task.submit`, `run.start`, `run.cancel`, `request.decide`,
 `log.subscribe`, `log.read`, `profile.list`, `host.status`.
 
-`log.subscribe { from_seq? }` returns a snapshot of non-terminal runs and the
-`seq` it reflects, then streams Events after it. A client that reconnects
-passes its last seen `seq` and receives every Event after it; the log is
-never truncated, so replay is always possible.
+`log.subscribe { after? }` reads a snapshot of non-terminal runs and the
+highest committed `seq` in one read transaction, returns both, then streams
+every Event with a greater `seq`. Nothing committed after the snapshot is
+missed or sent twice. A reconnecting client passes its cursor as `after`;
+the log is never truncated, so replay is always possible.
 
 ## Adapter conformance
 
@@ -188,5 +245,7 @@ suite. A run that needs an undeclared feature is `rejected`.
 
 - Profile format: TOML or YAML, and whether its JSON Schema is the source of
   truth.
-- Whether checks run inside the run's grant or a separate one.
 - Workspace allocation: caller-provided path, or a host-created git worktree.
+- A user-facing conversation that groups Tasks across workers, so one
+  thread survives a change of worker. Needed before the first interactive
+  client; not needed for the host.
