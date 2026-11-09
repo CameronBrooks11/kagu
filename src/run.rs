@@ -125,7 +125,12 @@ impl Actor<'_> {
                 let text = match serde_json::from_str::<Value>(&text) {
                     Ok(v) => {
                         let red = self.redact(v.clone());
-                        if red == v { text } else { red.to_string() }
+                        if red == v {
+                            // Numbers are not redacted as JSON; the text still is.
+                            self.redact_str(text)
+                        } else {
+                            red.to_string()
+                        }
                     }
                     Err(_) => self.redact_str(text),
                 };

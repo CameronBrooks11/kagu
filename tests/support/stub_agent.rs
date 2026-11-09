@@ -111,6 +111,11 @@ fn main() {
                         );
                         reply(&id, json!({"stopReason": secret}));
                     }
+                    "leak_number" => {
+                        eprintln!("{secret}");
+                        eprintln!("{{\"pin\": {secret}}}");
+                        reply(&id, json!({"stopReason": "end_turn"}));
+                    }
                     "noise" => {
                         println!("not json");
                         reply(&id, json!({"stopReason": "end_turn"}));

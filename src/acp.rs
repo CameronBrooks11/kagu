@@ -95,7 +95,7 @@ impl Conn {
     /// Take the child's piped stdio and watch for its exit.
     pub fn attach(mut child: Child) -> Self {
         // Bounded: a worker that outpaces the log blocks on its own pipe.
-        let (tx, rx) = sync_channel(1024);
+        let (tx, rx) = sync_channel(64);
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
         let stdin = child.stdin.take();

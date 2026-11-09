@@ -237,6 +237,13 @@ fn credentials_never_reach_the_log() {
 }
 
 #[test]
+fn a_numeric_secret_is_redacted_in_json_lines() {
+    let o = leak("leak_number", "987654321");
+    expect(&o, State::Completed, None);
+    assert_absent(&o, "987654321");
+}
+
+#[test]
 fn a_short_secret_does_not_rewrite_kagus_own_fields() {
     // "e" occurs in "exited", "failed", "run.state" and more.
     let o = leak("leak_stop", "e");
