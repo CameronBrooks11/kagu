@@ -2,7 +2,6 @@
 //! (Invariant 2). Each state change is appended before it takes effect
 //! (Invariant 1).
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -17,7 +16,8 @@ use serde_json::{Value, json};
 use crate::acp::{Conn, Msg};
 use crate::event::*;
 use crate::log::Log;
-use crate::profile;
+use crate::profile::{self, Substrate};
+use crate::substrate;
 
 /// ACP error code for "authentication required".
 const AUTH_REQUIRED: i64 = -32000;
@@ -334,13 +334,12 @@ impl Actor<'_> {
             }
             env.push((name.clone(), value));
         }
-        // No substrate yet: nothing is confined (spec: Grant).
-        let levels = BTreeMap::from([
-            ("credentials".to_string(), Level::Unsupported),
-            ("filesystem".to_string(), Level::Unsupported),
-            ("network".to_string(), Level::Unrestricted),
-            ("process_tree".to_string(), Level::Unsupported),
-        ]);
+        let grant = &loaded.profile.grant;
+        let probe = (grant.substrate == Substrate::Bwrap).then(|| substrate::probe());
+        let levels = match substrate::levels(grant, probe) {
+            Ok(l) => l,
+            Err(e) => return self.reject(e),
+        };
         self.log(
             Source::Host,
             &RunAdmitted {
@@ -348,17 +347,33 @@ impl Actor<'_> {
                 profile_digest: loaded.digest.clone(),
                 command: worker.command.clone(),
                 env: worker.env.clone(),
-                substrate: "none".into(),
+                substrate: serde_json::to_value(grant.substrate)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default(),
                 levels,
+                grant: grant.clone(),
             },
         )?;
 
-        let spawned = Command::new(&worker.command[0])
-            .args(&worker.command[1..])
-            .current_dir(&task.workspace)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .envs(env)
+        let mut command = match probe {
+            Some(Ok(probe)) => {
+                match substrate::command(probe, grant, &task.workspace, &worker.command, &env) {
+                    Ok(c) => c,
+                    Err(e) => return self.reject(e),
+                }
+            }
+            _ => {
+                let mut c = Command::new(&worker.command[0]);
+                c.args(&worker.command[1..])
+                    .current_dir(&task.workspace)
+                    .env_clear()
+                    .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                    .envs(env);
+                c
+            }
+        };
+        let spawned = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

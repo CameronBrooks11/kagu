@@ -1,6 +1,9 @@
 //! A kagu host for one test: started on a private database and socket,
 //! killed on drop.
 
+// Shared by several test crates; each uses part of it.
+#![allow(dead_code)]
+
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

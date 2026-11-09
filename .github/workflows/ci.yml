@@ -65,6 +65,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
       - run: just setup
+      # bubblewrap from the distribution, and unprivileged user namespaces,
+      # which Ubuntu 24.04 restricts through AppArmor (actions/runner-images#10443).
+      - run: |
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
       - run: just test-integration
 
   # About 15 minutes, mostly liveness; runs only when tla/ or this file changes

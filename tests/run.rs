@@ -34,7 +34,9 @@ fn stub_profile(dir: &Path, mode: &str, extra: &str) -> PathBuf {
     let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
     profile(
         dir,
-        &format!("version = 1\n[worker]\ncommand = [{stub:?}, {mode:?}]\n{extra}"),
+        &format!(
+            "version = 1\n[grant]\nsubstrate = \"none\"\n[worker]\ncommand = [{stub:?}, {mode:?}]\n{extra}"
+        ),
     )
 }
 

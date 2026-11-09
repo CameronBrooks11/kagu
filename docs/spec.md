@@ -193,9 +193,9 @@ reads or writes the log, and holds it while serving. The worker's
 effects up to that point are unknown. A recorded root still alive (same pid
 and start time) is killed through a pidfd before release is considered.
 
-Workers are spawned with `--die-with-parent` from one thread that lives as
-long as the host, because the parent-death signal follows the spawning
-thread, not the process.
+Workers are spawned with `--die-with-parent` from the run's actor thread,
+which outlives the worker it spawns: the parent-death signal follows the
+spawning thread, not the process.
 
 ### Release
 
@@ -350,8 +350,28 @@ setting whose value requests no restriction (network `host`) is recorded as
 
 The host starts `bwrap`, which builds the mount, PID and network
 namespaces and runs `kagu sandbox-init` inside them. That helper applies
-Landlock to itself, reports the ABI it got, and execs the worker. Landlock
-comes last because a Landlock-restricted process cannot mount.
+Landlock to itself with every right the host's probe found, refuses to run
+the worker if the ruleset is not fully enforced, and execs the worker.
+Landlock comes last because a Landlock-restricted process cannot mount. The
+host probes once, by running `sandbox-init --probe` inside `bwrap`: one
+call shows both that a user namespace can be created and which Landlock ABI
+is in force.
+
+Inside, the worker sees the system directories read-only, its workspace and
+the grant's `rw` paths read-write, the grant's `ro` paths and its own
+executable read-only, and a fresh tmpfs at `/tmp` holding `HOME` and the
+XDG directories. Its environment is set on `bwrap` itself, never passed as
+arguments, which any process of the same user can read.
+
+A profile's grant:
+
+```toml
+[grant]
+substrate = "bwrap"   # default; or "none"
+network = "host"      # default; or "off"
+ro = ["/abs/path"]    # extra read-only paths
+rw = ["/abs/path"]    # extra read-write paths
+```
 
 The network field takes one of three values:
 

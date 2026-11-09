@@ -34,6 +34,11 @@ fn main() {
     if mode == "exit_at_start" {
         return;
     }
+    if mode == "linger" {
+        // A descendant that would outlive its run if nothing contained it.
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        return;
+    }
     let mut prompt_id = Value::Null;
     for line in std::io::stdin().lock().lines() {
         let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -120,6 +125,15 @@ fn main() {
                         reply(&id, json!({"stopReason": "end_turn"}));
                     }
                     "hang" | "hang_hard" => update("working"),
+                    // Try to reach past the grant; report what was reachable.
+                    "probe" => {
+                        let req: Value = serde_json::from_str(
+                            msg["params"]["prompt"][0]["text"].as_str().unwrap_or("{}"),
+                        )
+                        .unwrap_or_default();
+                        update(&probe(&req).to_string());
+                        reply(&id, json!({"stopReason": "end_turn"}));
+                    }
                     "noise" => {
                         println!("not json");
                         reply(&id, json!({"stopReason": "end_turn"}));
@@ -153,4 +167,50 @@ fn main() {
             _ => error(&id, -32601, "unknown"),
         }
     }
+}
+
+/// Each attempt in `req`, and whether it succeeded.
+fn probe(req: &Value) -> Value {
+    use std::os::linux::net::SocketAddrExt;
+    let path = |k: &str| req[k].as_str().unwrap_or("").to_string();
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "read_outside".into(),
+        json!(std::fs::read(path("outside")).is_ok()),
+    );
+    out.insert(
+        "write_outside".into(),
+        json!(std::fs::write(path("outside_new"), "x").is_ok()),
+    );
+    out.insert(
+        "write_workspace".into(),
+        json!(std::fs::write("written-by-stub", "x").is_ok()),
+    );
+    out.insert(
+        "env_leaked".into(),
+        json!(std::env::var_os("KAGU_TEST_LEAK").is_some()),
+    );
+    let addr =
+        std::os::unix::net::SocketAddr::from_abstract_name(path("abstract").as_bytes()).unwrap();
+    out.insert(
+        "abstract_socket".into(),
+        json!(std::os::unix::net::UnixStream::connect_addr(&addr).is_ok()),
+    );
+    let tcp = "1.1.1.1:53".parse().unwrap();
+    out.insert(
+        "network".into(),
+        json!(
+            std::net::TcpStream::connect_timeout(&tcp, std::time::Duration::from_secs(3)).is_ok()
+        ),
+    );
+    // A descendant that outlives this process unless the tree is contained.
+    let marker = path("marker");
+    let me = std::env::current_exe().unwrap();
+    std::mem::forget(
+        std::process::Command::new(me)
+            .args(["linger", &marker])
+            .spawn()
+            .unwrap(),
+    );
+    Value::Object(out)
 }

@@ -127,6 +127,9 @@ pub struct RunAdmitted {
     pub env: BTreeMap<String, String>,
     pub substrate: String,
     pub levels: BTreeMap<String, Level>,
+    /// The grant as resolved for this run.
+    #[serde(default)]
+    pub grant: crate::profile::Grant,
 }
 payload!(RunAdmitted, "run.admitted", 1);
 

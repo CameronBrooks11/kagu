@@ -1,5 +1,64 @@
 {
   "$defs": {
+    "Grant": {
+      "additionalProperties": false,
+      "description": "What a run's worker may reach (spec: Grant).",
+      "properties": {
+        "network": {
+          "$ref": "#/$defs/Network",
+          "default": "host"
+        },
+        "ro": {
+          "default": [],
+          "description": "Extra paths the worker may read, such as its own runtime.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rw": {
+          "default": [],
+          "description": "Extra paths the worker may write, besides its workspace.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "substrate": {
+          "$ref": "#/$defs/Substrate",
+          "default": "bwrap"
+        }
+      },
+      "type": "object"
+    },
+    "Network": {
+      "oneOf": [
+        {
+          "const": "host",
+          "description": "The host's network, shared: recorded as `unrestricted`.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "An empty network namespace.",
+          "type": "string"
+        }
+      ]
+    },
+    "Substrate": {
+      "oneOf": [
+        {
+          "const": "bwrap",
+          "description": "bubblewrap namespaces with Landlock applied inside.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No confinement: every grant field is `unsupported`.",
+          "type": "string"
+        }
+      ]
+    },
     "Worker": {
       "additionalProperties": false,
       "properties": {
@@ -28,6 +87,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "grant": {
+      "$ref": "#/$defs/Grant",
+      "default": {
+        "network": "host",
+        "ro": [],
+        "rw": [],
+        "substrate": "bwrap"
+      }
+    },
     "version": {
       "description": "Profile schema version; must be 1.",
       "format": "uint32",
