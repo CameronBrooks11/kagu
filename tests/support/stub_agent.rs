@@ -39,6 +39,8 @@ fn main() {
         // The login method: the worker writes its own credential.
         let token = std::env::var("STUB_TOKEN").unwrap_or_default();
         std::fs::write(format!("{home}/credentials"), token).unwrap();
+        // A login that rewrites settings: confined, the pin stops it.
+        let _ = std::fs::write(format!("{home}/settings.json"), "planted");
         return;
     }
     if mode == "linger" {

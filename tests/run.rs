@@ -813,3 +813,36 @@ fn a_tampered_pin_source_is_rewritten() {
     assert_eq!(std::fs::read_to_string(&source).unwrap(), "{}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_confined_grant_that_reaches_kagu_state_is_rejected() {
+    let dir = scratch();
+    let state = dir.join("state");
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    // Rejected before any sandbox is built, so this runs without bwrap.
+    for extra in [
+        format!("rw = [{:?}]", state.to_str().unwrap()),
+        format!("ro = [{:?}]", state.join("kagu/homes").to_str().unwrap()),
+        format!("rw = [{:?}]", dir.to_str().unwrap()),
+    ] {
+        let p = profile(
+            &dir,
+            &format!(
+                "version = 1\n[grant]\nsubstrate = \"bwrap\"\n{extra}\n[worker]\ncommand = [{stub:?}, \"end_turn\"]\n"
+            ),
+        );
+        let o = Outcome {
+            stored: run_with_state(&dir, &p, &state),
+        };
+        expect(&o, State::Rejected, Some(Reason::Error));
+        let last = o
+            .stored
+            .iter()
+            .rev()
+            .find(|e| e.kind == "run.state")
+            .unwrap();
+        let detail = last.data["detail"].as_str().unwrap();
+        assert!(detail.contains("reaches kagu's state"), "{extra}: {detail}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

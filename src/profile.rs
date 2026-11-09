@@ -110,6 +110,37 @@ pub fn home_key(path: &Path) -> Result<String, String> {
     Ok(format!("{stem}-{short}"))
 }
 
+/// Refuse a confined grant that reaches kagu's own state: the event log,
+/// every profile's home and credentials, and the pinned files. kagu itself
+/// grants a run its own home and pins. Paths are compared as written, like
+/// the grant's other checks.
+pub fn keep_out_of_state(
+    env: crate::paths::Env,
+    grant: &Grant,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    if grant.substrate != Substrate::Bwrap {
+        return Ok(());
+    }
+    let state = crate::paths::state_with(env)?;
+    let state = std::fs::canonicalize(&state).unwrap_or(state);
+    for p in workspace
+        .into_iter()
+        .chain(grant.rw.iter().map(String::as_str))
+        .chain(grant.ro.iter().map(String::as_str))
+    {
+        let p = Path::new(p);
+        if p.starts_with(&state) || state.starts_with(p) {
+            return Err(format!(
+                "grant: {} reaches kagu's state {}",
+                p.display(),
+                state.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A profile's harness home, ready for a run.
 pub struct Home {
     pub path: String,
@@ -119,8 +150,8 @@ pub struct Home {
 
 /// Create the profile's harness home (0700) and place its `home_files`.
 ///
-/// Under bwrap each pinned file is bound read-only from an immutable,
-/// content-addressed copy in kagu's state, and the host never removes or
+/// Under bwrap each pinned file is bound read-only from a copy in kagu's
+/// state, named by its digest and rewritten every time, and the host never removes or
 /// renames a regular file in the home: that would detach the bind of a run
 /// already using it. Without a sandbox there are no binds, and each file
 /// is replaced atomically before the run.

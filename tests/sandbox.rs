@@ -238,6 +238,15 @@ fn the_home_is_writable_and_its_pinned_files_are_not() {
         "{}",
         String::from_utf8_lossy(&auth.stderr)
     );
+
+    // The login tried to plant the pinned file: bound, the host's copy is untouched.
+    let home = state
+        .join("kagu/homes")
+        .join(kagu::profile::home_key(&profile).unwrap());
+    assert_ne!(
+        std::fs::read_to_string(home.join("settings.json")).unwrap(),
+        "planted"
+    );
     let host = Host::start(&dir, &[("XDG_STATE_HOME", state.to_str().unwrap())]);
     let out = host
         .cli(&["run", "--json", "--prompt", "go"])
