@@ -54,3 +54,5 @@ Run `just check && just test` before every commit.
   none, so they run in CI and in the user's terminal; sessions run unit
   tests only.
 - Push without `-u`; a session cannot remove the config section it writes.
+- Where `~/.cargo` is read-only (an agent sandbox), point `CARGO_HOME` at a
+  writable directory before cargo downloads crates.
