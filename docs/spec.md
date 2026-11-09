@@ -71,8 +71,19 @@ flowchart TB
 
 A retry is a new Run of the same Task. A harness's own session id is a field
 of the Run, used to resume; kagu has no session object of its own. `thread`
-is an opaque label clients may group Tasks by; kagu attaches no behaviour to
-it.
+is a label clients may group Tasks by; kagu's only use of it is to carry it
+across a continuation.
+
+A continuation (`task.continue`) is a new Task with the earlier run's profile
+and workspace, in its thread, recording which run it `continues`. Its run
+resumes that run's worker session with ACP `session/resume` instead of
+`session/new`, and fails if the worker does not offer resume. A run can be
+continued once, so a chain stays linear and each run resumes exactly the
+history its log shows. A run that logged no turn content adds nothing to the
+chain: a continuation resumes the chain's session only if some run in it
+logged turn content (a message, thought, tool call or plan update), and
+otherwise opens a new session. Only a run
+that has ended can be continued.
 
 The workspace is a directory the caller names. kagu locks it (invariant 8)
 and grants it; it does not create, clone or otherwise manage it.

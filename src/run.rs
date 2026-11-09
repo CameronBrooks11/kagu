@@ -387,6 +387,32 @@ impl Actor<'_> {
             Err(e) => return self.reject(e),
         };
         let worker = &loaded.profile.worker;
+        // A continuation resumes its chain's session if a turn ever started in
+        // it, as the log shows by turn content (a message, thought, tool call
+        // or plan; not the notices an adapter sends on setup). A session no
+        // turn started in holds nothing, and the harness may not know it, so
+        // the continuation starts a new one.
+        // A resume keeps the session id, so the whole chain shares it.
+        let mut resume = None;
+        let mut back = task.continues.clone();
+        while let Some(prev) = back {
+            let events = self.log.events(&prev)?;
+            if events
+                .iter()
+                .any(|e| e.kind == WorkerUpdate::TYPE && turn_content(&e.data))
+            {
+                resume = events
+                    .iter()
+                    .rev()
+                    .find(|e| e.kind == WorkerSession::TYPE)
+                    .and_then(|e| e.data["session_id"].as_str().map(str::to_string));
+                break;
+            }
+            back = events
+                .iter()
+                .find(|e| e.kind == TaskSubmitted::TYPE)
+                .and_then(|e| e.data["continues"].as_str().map(str::to_string));
+        }
         let mut env = Vec::new();
         for (name, reference) in &worker.env {
             let var = profile::reference_var(reference).expect("validated at load");
@@ -519,20 +545,33 @@ impl Actor<'_> {
             return self.to(State::Failed, Some(Reason::Error), Some(detail));
         }
 
-        let mut new = json!({"cwd": task.workspace, "mcpServers": []});
+        let mut params = json!({"cwd": task.workspace, "mcpServers": []});
         if let Some(p) = &worker.system_prompt {
-            new["systemPrompt"] =
+            params["systemPrompt"] =
                 json!({"mode": p.mode, "content": [{"type": "text", "text": p.text}]});
         }
         if let Some(meta) = &worker.meta {
-            new["_meta"] = Value::Object(meta.clone());
+            params["_meta"] = Value::Object(meta.clone());
         }
-        let session = match self.call("session/new", new)? {
-            Ok(r) => r
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            Err(e) => return self.fail(e),
+        let session = match &resume {
+            None => match self.call("session/new", params)? {
+                Ok(r) => r
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                Err(e) => return self.fail(e),
+            },
+            Some(id) => {
+                if !result["agentCapabilities"]["sessionCapabilities"]["resume"].is_object() {
+                    let detail = "the worker does not offer session/resume".to_string();
+                    return self.to(State::Failed, Some(Reason::Error), Some(detail));
+                }
+                params["sessionId"] = json!(id);
+                match self.call("session/resume", params)? {
+                    Ok(_) => Some(id.clone()),
+                    Err(e) => return self.fail(e),
+                }
+            }
         };
         let Some(session_id) = session else {
             let detail = "session/new returned no sessionId".to_string();
@@ -638,7 +677,14 @@ fn new_run_id() -> String {
 
 /// Record a task and its first run, `submitted`. The workspace must be an
 /// absolute path to a directory; the profile a path or a profile name.
-pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
+pub fn submit(log: &Log, task: TaskSubmitted) -> Result<String, String> {
+    if task.continues.is_some() {
+        return Err("a continuation is submitted with task.continue".to_string());
+    }
+    record(log, task)
+}
+
+fn record(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
     let workspace = Path::new(&task.workspace);
     if !workspace.is_absolute() {
         return Err(format!("workspace {} is not absolute", workspace.display()));
@@ -657,13 +703,7 @@ pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
         .to_string();
     let id = new_run_id();
     let data = serde_json::to_value(&task).expect("task serializes");
-    log.append(
-        &id,
-        Source::Client,
-        TaskSubmitted::TYPE,
-        TaskSubmitted::V,
-        data,
-    )?;
+    log.append_task(&id, data)?;
     append_state(log, &id, State::Submitted)?;
     Ok(id)
 }
@@ -671,6 +711,47 @@ pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
 /// Where credential references and the state directory are resolved: the
 /// host's environment.
 pub use crate::paths::Env;
+
+/// Whether a `session/update` is content of a turn, which exists only once
+/// the turn has started.
+fn turn_content(update: &Value) -> bool {
+    matches!(
+        update["sessionUpdate"].as_str(),
+        Some(
+            "user_message_chunk"
+                | "agent_message_chunk"
+                | "agent_thought_chunk"
+                | "tool_call"
+                | "tool_call_update"
+                | "plan"
+        )
+    )
+}
+
+/// Record a task that continues `prev` with `input`: the same profile and
+/// workspace, in the same thread, resuming `prev`'s worker session.
+pub fn continue_run(log: &Log, prev: &str, input: String) -> Result<String, String> {
+    let events = log.events(prev)?;
+    let earlier: TaskSubmitted = events
+        .iter()
+        .find(|e| e.kind == TaskSubmitted::TYPE)
+        .ok_or_else(|| format!("no run {prev}"))
+        .and_then(|e| serde_json::from_value(e.data.clone()).map_err(|e| e.to_string()))?;
+    let state = fold(&events).map_err(|e| e.to_string())?.state;
+    if !state.is_some_and(State::is_terminal) {
+        return Err(format!("run {prev} has not ended"));
+    }
+    record(
+        log,
+        TaskSubmitted {
+            profile: earlier.profile,
+            workspace: earlier.workspace,
+            input,
+            thread: earlier.thread.or_else(|| Some(prev.to_string())),
+            continues: Some(prev.to_string()),
+        },
+    )
+}
 
 /// Drive a submitted run to a terminal state. Runs on the run's own thread.
 pub fn start(log: &Log, id: &str, cancel: &Cancel, env_var: Env) -> Result<(), String> {
@@ -721,4 +802,36 @@ fn append_state(log: &Log, id: &str, to: State) -> Result<(), String> {
     let data = serde_json::to_value(&state).expect("state serializes");
     log.append(id, Source::Host, RunState::TYPE, RunState::V, data)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use serde_json::json;
+
+    #[test]
+    fn turn_content_is_what_a_turn_streams_and_not_setup_notices() {
+        for kind in [
+            "user_message_chunk",
+            "agent_message_chunk",
+            "agent_thought_chunk",
+            "tool_call",
+            "tool_call_update",
+            "plan",
+        ] {
+            assert!(
+                super::turn_content(&json!({ "sessionUpdate": kind })),
+                "{kind}"
+            );
+        }
+        for kind in [
+            "available_commands_update",
+            "current_mode_update",
+            "session_info_update",
+        ] {
+            assert!(
+                !super::turn_content(&json!({ "sessionUpdate": kind })),
+                "{kind}"
+            );
+        }
+    }
 }

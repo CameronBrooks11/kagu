@@ -2,7 +2,7 @@
   "params": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "`task.submitted`: the intent, as the client gave it.",
+    "description": "Params of `task.submit`.",
     "properties": {
       "input": {
         "type": "string"
@@ -25,13 +25,13 @@
       "workspace",
       "input"
     ],
-    "title": "TaskSubmitted",
+    "title": "Submit",
     "type": "object"
   },
   "result": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Result of `task.submit`.",
+    "description": "Result of `task.submit` and `task.continue`.",
     "properties": {
       "run": {
         "type": "string"

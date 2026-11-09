@@ -111,6 +111,9 @@ pub struct TaskSubmitted {
     pub input: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
+    /// The run this task continues, resuming its worker session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
 }
 payload!(TaskSubmitted, "task.submitted", 1);
 

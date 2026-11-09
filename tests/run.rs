@@ -46,6 +46,7 @@ fn task(dir: &Path, profile: &Path) -> TaskSubmitted {
         workspace: dir.to_str().unwrap().into(),
         input: "do the thing".into(),
         thread: None,
+        continues: None,
     }
 }
 
@@ -104,7 +105,11 @@ fn end_turn_completes_unverified() {
     ] {
         assert!(k.contains(&want), "missing {want} in {k:?}");
     }
-    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
     assert_eq!(update.data["sessionUpdate"], "agent_message_chunk");
     let raw = o.stored.iter().find(|e| e.kind == "worker.raw").unwrap();
     assert_eq!(raw.data["stream"], "stderr");
@@ -732,6 +737,164 @@ fn the_example_claude_profile_loads() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/claude-code.toml");
     let loaded = kagu::profile::load(&path).unwrap();
     assert_eq!(loaded.profile.worker.home_env, ["CLAUDE_CONFIG_DIR"]);
+}
+
+#[test]
+fn continue_resumes_the_earlier_session_in_its_thread() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "resumable", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let first = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &first, &Cancel::default(), &|_| None).unwrap();
+    let next = run::continue_run(&log, &first, "and then".into()).unwrap();
+    run::start(&log, &next, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&next).unwrap(),
+    };
+    expect(&o, State::Completed, None);
+    let submitted = &o.stored[0].data;
+    assert_eq!(submitted["continues"], first.as_str());
+    assert_eq!(submitted["thread"], first.as_str());
+    assert_eq!(submitted["input"], "and then");
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(update.data["content"]["text"], "resumed s1");
+    // A third run keeps the same thread.
+    let third = run::continue_run(&log, &next, "more".into()).unwrap();
+    assert_eq!(
+        log.events(&third).unwrap()[0].data["thread"],
+        first.as_str()
+    );
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn continue_needs_a_finished_run_and_a_resumable_worker() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "end_turn", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let unstarted = run::submit(&log, task(&dir, &p)).unwrap();
+    assert!(
+        run::continue_run(&log, &unstarted, "x".into())
+            .unwrap_err()
+            .contains("not ended")
+    );
+    run::start(&log, &unstarted, &Cancel::default(), &|_| None).unwrap();
+    // This stub does not offer session/resume.
+    let next = run::continue_run(&log, &unstarted, "x".into()).unwrap();
+    run::start(&log, &next, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&next).unwrap(),
+    };
+    expect(&o, State::Failed, Some(Reason::Error));
+    let last = o
+        .stored
+        .iter()
+        .rev()
+        .find(|e| e.kind == "run.state")
+        .unwrap();
+    assert!(
+        last.data["detail"]
+            .as_str()
+            .unwrap()
+            .contains("session/resume")
+    );
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_run_is_continued_once_and_only_through_continue() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "resumable", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let a = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &a, &Cancel::default(), &|_| None).unwrap();
+    // task.submit cannot name a run to continue.
+    let mut forged = task(&dir, &p);
+    forged.continues = Some(a.clone());
+    assert!(
+        run::submit(&log, forged)
+            .unwrap_err()
+            .contains("task.continue")
+    );
+    let b = run::continue_run(&log, &a, "next".into()).unwrap();
+    // Continuing A again, while B runs or after, is refused and names B.
+    let err = run::continue_run(&log, &a, "again".into()).unwrap_err();
+    assert!(err.contains(&b), "{err}");
+    drop(log);
+    // The rule survives a restart: the projection is rebuilt from the log.
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    assert!(
+        run::continue_run(&log, &a, "again".into())
+            .unwrap_err()
+            .contains(&b)
+    );
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_continuation_that_never_started_does_not_end_the_chain() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "resumable", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let a = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &a, &Cancel::default(), &|_| None).unwrap();
+    // B is canceled before it starts, so it never reaches a session.
+    let b = run::continue_run(&log, &a, "lost".into()).unwrap();
+    run::cancel_unstarted(&log, &b).unwrap();
+    // Continuing B resumes A's session.
+    let c = run::continue_run(&log, &b, "next".into()).unwrap();
+    run::start(&log, &c, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&c).unwrap(),
+    };
+    expect(&o, State::Completed, None);
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(update.data["content"]["text"], "resumed s1");
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_session_no_turn_ran_in_is_not_resumed() {
+    let dir = scratch();
+    // A gets a session, but its prompt is refused before any turn runs.
+    let p = stub_profile(&dir, "prompt_auth", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let a = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &a, &Cancel::default(), &|_| None).unwrap();
+    assert!(
+        log.events(&a)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "worker.session")
+    );
+    // The continuation, against a worker that can resume, opens a new session.
+    assert_eq!(stub_profile(&dir, "resumable", ""), p);
+    let b = run::continue_run(&log, &a, "again".into()).unwrap();
+    run::start(&log, &b, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&b).unwrap(),
+    };
+    expect(&o, State::Completed, None);
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(update.data["content"]["text"], "resumed ");
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A worker with one pinned file, and a grant with `substrate`.

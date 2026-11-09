@@ -12,6 +12,7 @@ const USAGE: &str = "usage:
   kagu run --profile <name|file> --workspace <dir> --prompt <text> [--thread <id>] [--json]
   kagu watch [<run>] [--after <seq>] [--json]
   kagu log <run> [--json]
+  kagu continue <run> --prompt <text> [--json]
   kagu cancel <run>
   kagu status
   kagu auth <profile> [--method <id>]
@@ -113,6 +114,20 @@ fn cli(args: Vec<String>) -> Result<ExitCode, String> {
         "run" => {
             args.only(&["profile", "workspace", "prompt", "thread", "socket"])?;
             run(&args)
+        }
+        "continue" => {
+            args.only(&["prompt", "socket"])?;
+            let prev = args.positional.first().ok_or(USAGE)?;
+            let input = args.required("prompt")?;
+            let (_, events) = args.connect()?.subscribe(None)?;
+            let mut control = args.connect()?;
+            let run = control.call("task.continue", json!({ "run": prev, "input": input }))?["run"]
+                .as_str()
+                .ok_or("host returned no run id")?
+                .to_string();
+            eprintln!("kagu: run {run} continues {prev}");
+            control.call("run.start", json!({ "run": run }))?;
+            follow(&run, events, Render::new(args.json), 0)
         }
         "watch" => {
             args.only(&["after", "socket"])?;
