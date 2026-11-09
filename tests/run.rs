@@ -473,22 +473,35 @@ fn an_existing_socket_directory_is_never_changed() {
             .arg(dir.join("kagu.db"))
             .arg("--socket")
             .arg(sock)
-            .output()
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .unwrap()
     };
     // Writable by others: refused, and left as it was.
     let open = dir.join("open");
     std::fs::create_dir(&open).unwrap();
     std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-    let out = serve(&open.join("kagu.sock"));
+    let out = serve(&open.join("kagu.sock")).wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("writable by group or others"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not private to this user"));
     assert_eq!(mode(&open), 0o777);
-    // Private but not 0700: used as it is, never tightened or loosened.
+    // Private but not 0700: used as it is, never tightened. Where the bind
+    // works the host keeps serving, so stop it once it has bound or exited.
     let shared = dir.join("shared");
     std::fs::create_dir(&shared).unwrap();
     std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _ = serve(&shared.join("kagu.sock"));
+    let sock = shared.join("kagu.sock");
+    let mut host = serve(&sock);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !sock.exists() && host.try_wait().unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "host neither bound nor exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = host.kill();
+    let _ = host.wait();
     assert_eq!(mode(&shared), 0o755);
     std::fs::remove_dir_all(&dir).unwrap();
 }

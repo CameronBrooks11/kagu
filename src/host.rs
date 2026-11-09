@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -110,15 +110,22 @@ pub fn lock_db(db: &Path) -> Result<std::fs::File, String> {
     }
 }
 
+/// This process's user, as the owner of its own /proc entry (Linux).
+fn own_uid() -> Result<u32, String> {
+    std::fs::metadata("/proc/self")
+        .map(|m| m.uid())
+        .map_err(|e| format!("/proc/self: {e}"))
+}
+
 /// A private socket: its directory is 0700 and the socket 0600.
 fn bind(socket: &Path) -> Result<UnixListener, String> {
     let dir = socket.parent().ok_or("socket path has no directory")?;
     match std::fs::metadata(dir) {
-        // An existing directory is never changed: refuse one that others
-        // could write to, since they could replace the socket.
-        Ok(meta) if meta.permissions().mode() & 0o022 != 0 => {
+        // An existing directory is never changed: refuse one another user
+        // owns or can write to, since they could replace the socket.
+        Ok(meta) if meta.permissions().mode() & 0o022 != 0 || meta.uid() != own_uid()? => {
             return Err(format!(
-                "{} is writable by group or others; choose a private directory for the socket",
+                "{} is not private to this user; choose a directory only you own and can write",
                 dir.display()
             ));
         }
