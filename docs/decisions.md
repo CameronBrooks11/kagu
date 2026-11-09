@@ -73,7 +73,8 @@ recording an exit the host never observed.
 ## 6. Commands for work, reconciliation for resources
 
 Tasks and runs are imperative and at most once. Desired-state reconciliation
-is reserved for things that converge: substrate available, worktree present.
+is reserved for things that converge: substrate available, harness home
+present.
 
 Why: a controller loop assumes idempotent actuators. "Task done" is not a
 level the system can converge to, and re-running an agent is not idempotent.
@@ -149,16 +150,17 @@ refreshing tokens; hiding or disabling a method the worker supports.
 
 ## 12. A harness home per profile
 
-Each profile owns the directory the harness keeps its login, settings and
-transcripts in. The user's own harness configuration is granted only on
-request. Workspace harness configuration is not loaded unless the profile
-opts in.
+Each profile owns the directory the harness keeps its login and
+transcripts in. Configuration is passed per run and never loaded from the
+home. The user's own harness directory is used only on request. Workspace
+harness configuration is not loaded unless the profile opts in.
 
 Why: harnesses keep login and resumable transcripts in one directory, so a
 home per task would mean signing in per task, and a home shared with the
 user exposes their settings, user-level hooks (which run code) and history
-read-write. Workspace configuration can carry hooks too; a repository is
-input, not configuration.
+read-write. The home is writable, so configuration loaded from it could be
+planted by one run for the next. Workspace configuration can carry hooks
+too; a repository is input, not configuration.
 
 Rejected: a home per task; the user's `~/.claude` (or equivalent) by
 default; loading workspace configuration by default.
@@ -168,12 +170,10 @@ default; loading workspace configuration by default.
 Schemas are generated from the Rust types, committed, and checked for drift
 in CI. A changed versioned schema is a breaking change by rule.
 
-Why: Rust codegen from hand-written JSON Schema is weak (`typify` handles
-tagged enums awkwardly; `schemafy` has had no release since 2021), while
-`schemars` targets 2020-12 directly. Committing the output keeps the
-contract diffable without trusting a schema-diff tool. TOML suits shallow
-profiles and avoids YAML's implicit typing; the maintained Rust YAML crates
-have thinned to one.
+Why: the types are where the code lives, so generating schemas from them
+keeps one source; committing the output keeps the contract reviewable
+without trusting a schema-diff tool. TOML suits shallow profiles and avoids
+YAML's implicit typing.
 
 Rejected: hand-written JSON Schema driving the types; YAML; JSON (no
 comments).
@@ -196,10 +196,8 @@ Rejected: a conversation noun before any interactive client exists.
 
 ## 16. Substrate: bwrap and Landlock, built in
 
-Linux first. The host drives an external `bwrap` (0.12 or later) and the
-`landlock` crate itself; `srt` is an optional external substrate. Network
-is `off`, `host` (reported `unsupported`) or `allow-list` through kagu's
-own egress proxy.
+Linux first. The host drives an external `bwrap` (0.12 or later) and
+applies Landlock itself; `srt` is an optional external substrate.
 
 Why: `srt` is pre-1.0, runs on Node and documents fail-open cases, so it
 cannot be the base of an enforcement claim. Without a user namespace there
