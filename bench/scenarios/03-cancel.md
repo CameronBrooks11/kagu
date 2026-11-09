@@ -22,7 +22,7 @@ summary of each to summaries.txt.
 
 - The last `run.state` is `canceled`, timestamped no more than 3 s after the time noted before `kagu cancel`.
 - A `worker.exited` event is recorded.
-- After the run ends, `pgrep -f claude-agent-acp` prints nothing.
+- After the run ends, `ps -p <pid>` with the pid from `worker.spawned` finds no process.
 
 ## Record
 

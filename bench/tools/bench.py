@@ -16,23 +16,37 @@ import math
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
-VERSION = 1
+VERSION = 2
 BENCH = Path(__file__).resolve().parent.parent
 REPO = BENCH.parent
 # A string longer than this is cut, keeping its length and digest.
 CAP = 4096
-CANARY = re.compile(r"KAGU-CANARY-[0-9a-f]{16,}")
-CANARY_DIR = Path.home() / ".kagu-canary"
+TRIAL_FILES = {"events.jsonl", "env.json", "trial.md"}
+TOOL_FILES = {"bench.py", "test_bench.py"}
+CANARY = re.compile(r"KAGU-CANARY-[0-9A-Fa-f]+", re.IGNORECASE)
+# Account and host names too common to be identifying, such as a CI runner's.
+GENERIC_NAMES = {
+    "admin", "codespace", "debian", "fedora", "kagu", "localhost", "root",
+    "runner", "ubuntu", "user", "vscode",
+}
 
 # Patterns that identify a person or machine whoever runs this. A placeholder
 # (`<user>`, `~`) never matches them.
 GENERIC = [
     ("home path", re.compile(r"/(?:home|Users)/(?!<)[^/\s\"'<>]+"), "/home/<user>"),
+    (
+        "windows home",
+        re.compile(r"[A-Za-z]:\\+(?:Users|Documents and Settings)\\+(?!<)[^\\\s\"'<>]+"),
+        r"C:\\Users\\<user>",
+    ),
+    ("tilde home", re.compile(r"(?<![\w~])~(?!<)[A-Za-z_][\w-]*(?=/)"), "~<user>"),
     ("email", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"), "<email>"),
     ("mac", re.compile(r"\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b"), "<mac>"),
     (
@@ -45,7 +59,12 @@ GENERIC = [
     ),
     ("uid path", re.compile(r"/run/user/\d+"), "/run/user/<uid>"),
 ]
-TOKEN = re.compile(r"[A-Za-z0-9+/_-]{24,}={0,2}")
+IPV6 = re.compile(r"(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
+# Candidate secrets: runs of URL-safe base64. `/`, `+` and `.` end a run, so
+# paths and versions are not candidates.
+TOKEN = re.compile(r"[A-Za-z0-9_-]{16,}")
+# Identifiers a trial needs whose random part would otherwise look secret.
+KEEP = re.compile(r"^(?:toolu_|sha(?:256|384|512)-)")
 
 
 def entropy(s):
@@ -54,9 +73,37 @@ def entropy(s):
 
 
 def secret_like(s):
-    # Hex (sha256 digests, run ids) tops out at 4 bits a character; secrets
-    # in base64 or base62 run higher.
-    return entropy(s) >= 4.3 and any(c.isdigit() for c in s) and any(c.isalpha() for c in s)
+    """A random-looking run: upper case, lower case and digits mixed, with
+    entropy near what random text of its length has.
+
+    Identifiers are mostly single-case words and hex is never mixed-case, so
+    both are kept; hex secrets are left to gitleaks. Measured on random
+    base62 and URL-safe tokens of 16 to 40 characters: about 92 to 98 percent
+    caught.
+    """
+    if KEEP.match(s):
+        return False
+    if not (any(c.isupper() for c in s) and any(c.islower() for c in s) and any(c.isdigit() for c in s)):
+        return False
+    return entropy(s) >= 0.85 * math.log2(min(len(s), 64))
+
+
+def ipv6_like(s):
+    return ("::" in s or s.count(":") == 7) and s not in ("::", "::1")
+
+
+def canary_dir():
+    return Path(os.environ.get("KAGU_CANARY_DIR") or Path.home() / ".kagu-canary")
+
+
+def planted_canary():
+    """The hex of the canary `bench.py canary` planted, if any."""
+    try:
+        text = (canary_dir() / "secret.txt").read_text().strip()
+    except OSError:
+        return None
+    match = CANARY.fullmatch(text)
+    return text[len("KAGU-CANARY-"):].lower() if match else None
 
 
 def local_identifiers():
@@ -64,37 +111,42 @@ def local_identifiers():
     found = []
 
     def add(label, value, placeholder):
-        if value and len(value) >= 3:
+        if value and len(value) >= 3 and value.lower() not in GENERIC_NAMES:
             found.append((label, value, placeholder))
 
     add("home", str(Path.home()), "~")
     add("user", getpass.getuser(), "<user>")
     add("host", socket.gethostname(), "<host>")
     for key, placeholder in (("user.email", "<email>"), ("user.name", "<name>")):
-        try:
-            value = subprocess.run(
-                ["git", "config", "--get", key], capture_output=True, text=True, check=False
-            ).stdout.strip()
-        except OSError:
-            value = ""
-        add("git " + key, value, placeholder)
+        add("git " + key, run(["git", "config", "--get", key]) or "", placeholder)
+    canary = planted_canary()
+    if canary:
+        found.append(("canary", canary, "<canary>"))
     # Longest first, so a home path goes before the user name inside it.
     return sorted(found, key=lambda f: -len(f[1]))
 
 
-def word(value):
-    return re.compile(r"(?<![\w.-])" + re.escape(value) + r"(?![\w-])")
+def local_pattern(label, value):
+    if label == "home":
+        return re.compile(re.escape(value) + r"(?![\w.-])")
+    flags = re.IGNORECASE if label == "canary" else 0
+    return re.compile(r"(?<![\w.-])" + re.escape(value) + r"(?![\w-])", flags)
+
+
+def normalize(text):
+    """Undo the encodings a path or address can hide behind."""
+    text = re.sub(r"\\u002[fF]", "/", text).replace("\\/", "/")
+    return urllib.parse.unquote(text)
 
 
 def redact_text(text, local):
-    for label, value, placeholder in local:
-        if label == "home":
-            text = text.replace(value, placeholder)
-        else:
-            text = word(value).sub(placeholder, text)
+    text = normalize(text)
     text = CANARY.sub("<canary>", text)
+    for label, value, placeholder in local:
+        text = local_pattern(label, value).sub(placeholder, text)
     for _, pattern, placeholder in GENERIC:
         text = pattern.sub(placeholder, text)
+    text = IPV6.sub(lambda m: "<ip>" if ipv6_like(m.group()) else m.group(), text)
     text = TOKEN.sub(lambda m: "<token>" if secret_like(m.group()) else m.group(), text)
     if len(text) > CAP:
         digest = hashlib.sha256(text.encode()).hexdigest()
@@ -115,52 +167,93 @@ def redact(value, local):
 def findings(text, local):
     """Why `text` is unsafe to commit; empty when it is safe."""
     found = []
-    for label, value, _ in local:
-        if (value in text) if label == "home" else word(value).search(text):
-            found.append(f"local {label}")
-    if CANARY.search(text):
-        found.append("canary")
-    for label, pattern, _ in GENERIC:
-        if pattern.search(text):
-            found.append(label)
-    if any(secret_like(m.group()) for m in TOKEN.finditer(text)):
-        found.append("token")
-    return found
+    for candidate in dict.fromkeys((text, normalize(text))):
+        for label, value, _ in local:
+            if local_pattern(label, value).search(candidate):
+                found.append(f"local {label}")
+        if CANARY.search(candidate):
+            found.append("canary")
+        for label, pattern, _ in GENERIC:
+            if pattern.search(candidate):
+                found.append(label)
+        if any(ipv6_like(m.group()) for m in IPV6.finditer(candidate)):
+            found.append("ipv6")
+        if any(secret_like(m.group()) for m in TOKEN.finditer(candidate)):
+            found.append("token")
+    return list(dict.fromkeys(found))
+
+
+def seal(head, body):
+    """The digest over a log's header fields and its body."""
+    fields = {k: v for k, v in head.items() if k != "sha256"}
+    return hashlib.sha256((json.dumps(fields, sort_keys=True) + "\n" + body).encode()).hexdigest()
 
 
 def header_problem(path):
-    """An events.jsonl must be the redactor's output, unedited."""
+    """An events.jsonl must be the redactor's output, unedited. This catches
+    edits; anyone can run the tool, so it is not proof against forgery."""
     lines = path.read_text().split("\n", 1)
     try:
         head = json.loads(lines[0])
     except json.JSONDecodeError:
         return "no bench header"
-    if head.get("kagu_bench") != VERSION:
+    if not isinstance(head, dict) or head.get("kagu_bench") != VERSION:
         return "no bench header"
     body = lines[1] if len(lines) > 1 else ""
-    if hashlib.sha256(body.encode()).hexdigest() != head.get("sha256"):
+    if seal(head, body) != head.get("sha256"):
         return "edited after capture (hash mismatch)"
     return None
 
 
-def check(paths, local=None):
-    local = local_identifiers() if local is None else local
-    if not paths:
-        paths = [
-            p
-            for p in BENCH.rglob("*")
-            if p.is_file() and BENCH / "tools" not in p.parents
-        ]
-    failed = False
-    for path in map(Path, paths):
-        path = path.resolve()
-        if BENCH / "tools" in path.parents or not path.is_file():
-            continue
-        problems = findings(path.read_text(errors="replace"), local)
-        if path.name == "events.jsonl":
+def problems_of(path, local, bench):
+    """Everything wrong with one path under `bench`."""
+    if path.is_symlink():
+        return ["symlink (git would commit its target path)"]
+    rel = path.relative_to(bench)
+    if rel.parts[0] == "tools":
+        if "__pycache__" in rel.parts:
+            return []
+        return [] if len(rel.parts) == 2 and rel.name in TOOL_FILES else ["unexpected file in tools/"]
+    found = []
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return ["not UTF-8 text"]
+    found += findings(text, local)
+    if rel.parts[0] == "trials":
+        if len(rel.parts) != 3 or rel.name not in TRIAL_FILES:
+            found.append("a trial holds only " + ", ".join(sorted(TRIAL_FILES)))
+        elif rel.name == "events.jsonl":
             problem = header_problem(path)
             if problem:
-                problems.append(problem)
+                found.append(problem)
+    return found
+
+
+def check(paths, local=None, bench=None):
+    local = local_identifiers() if local is None else local
+    bench = bench or BENCH
+    if paths:
+        targets = [Path(os.path.abspath(p)) for p in paths]
+        # A file in a trial brings in the rest of its trial.
+        for p in list(targets):
+            rel = p.relative_to(bench).parts if bench in p.parents else ()
+            if len(rel) == 3 and rel[0] == "trials":
+                targets += [p.parent / name for name in TRIAL_FILES]
+    else:
+        targets = []
+        for root, dirs, files in os.walk(bench):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            links = [d for d in dirs if (Path(root) / d).is_symlink()]
+            targets += [Path(root) / n for n in files + links]
+    failed = False
+    for path in dict.fromkeys(targets):
+        if bench not in path.parents:
+            problems = findings(path.read_text(errors="replace"), local) if path.is_file() else []
+        elif not (path.exists() or path.is_symlink()):
+            problems = ["missing"]
+        else:
+            problems = problems_of(path, local, bench)
         for problem in problems:
             failed = True
             shown = path.relative_to(REPO) if REPO in path.parents else path
@@ -176,10 +269,29 @@ def run(argv):
 
 
 def kagu_binary():
-    for candidate in (os.environ.get("KAGU"), REPO / "target/release/kagu", "kagu"):
-        if candidate and (Path(candidate).is_file() or candidate == "kagu"):
-            return str(candidate)
-    return "kagu"
+    for candidate in (os.environ.get("KAGU"), REPO / "target/release/kagu"):
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate).resolve())
+    return shutil.which("kagu") or "kagu"
+
+
+def build_info(binary):
+    """The commit the checkout is at, and whether `binary` was built since."""
+    commit = run(["git", "-C", str(REPO), "rev-parse", "HEAD"])
+    if not commit:
+        sys.exit("bench: no git commit to record; capture from a kagu checkout")
+    committed = run(["git", "-C", str(REPO), "log", "-1", "--format=%ct"])
+    try:
+        built_after = Path(binary).stat().st_mtime >= int(committed)
+    except (OSError, TypeError, ValueError):
+        built_after = None
+    dirty = run(["git", "-C", str(REPO), "status", "--porcelain", "--", ":!bench"])
+    return {
+        "kagu_commit": commit,
+        "kagu_tree_dirty": bool(dirty),
+        "kagu_binary": binary,
+        "kagu_binary_built_after_commit": built_after,
+    }
 
 
 def scenario_file(name, bench=BENCH):
@@ -197,34 +309,42 @@ def criteria(text):
     return [line[2:].strip() for line in body.splitlines() if line.startswith("- ")]
 
 
+def next_trial(trials, today, slug):
+    numbers = [
+        int(p.name[len(today) + 1:][:2])
+        for p in trials.glob(f"{today}-[0-9][0-9]-*")
+    ] if trials.exists() else []
+    return trials / f"{today}-{max(numbers, default=0) + 1:02d}-{slug}"
+
+
 def capture(scenario, run_id, bench=BENCH, local=None):
     local = local_identifiers() if local is None else local
     source = scenario_file(scenario, bench)
+    binary = kagu_binary()
     out = subprocess.run(
-        [kagu_binary(), "log", run_id, "--json"], capture_output=True, text=True, check=False
+        [binary, "log", run_id, "--json"], capture_output=True, text=True, check=False
     )
     if out.returncode != 0:
         sys.exit(f"bench: kagu log {run_id}: {out.stderr.strip()}")
     events = [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
-    canary_seen = sum(len(CANARY.findall(line)) for line in out.stdout.splitlines())
+    planted = planted_canary()
+    raw = normalize(out.stdout)
+    canary_seen = (
+        len(re.findall(re.escape(planted), raw, re.IGNORECASE)) if planted
+        else len(CANARY.findall(raw))
+    )
     body = "".join(json.dumps(redact(e, local), sort_keys=True) + "\n" for e in events)
-    head = {
-        "kagu_bench": VERSION,
-        "sha256": hashlib.sha256(body.encode()).hexdigest(),
-        "events": len(events),
-        "canary_seen": canary_seen,
-    }
+    head = {"kagu_bench": VERSION, "events": len(events), "canary_seen": canary_seen}
+    head["sha256"] = seal(head, body)
 
     def first(kind):
         return next((e["data"] for e in events if e.get("type") == kind), {})
 
     admitted = first("run.admitted")
     states = [e["data"].get("to") for e in events if e.get("type") == "run.state"]
-    dirty = run(["git", "-C", str(REPO), "status", "--porcelain", "--", ":!bench"])
     env = redact(
         {
-            "kagu_commit": run(["git", "-C", str(REPO), "rev-parse", "HEAD"]),
-            "kagu_tree_dirty": bool(dirty),
+            **build_info(binary),
             "kernel": run(["uname", "-r"]),
             "bwrap": run(["bwrap", "--version"]),
             "agent_info": first("worker.initialized").get("agent_info"),
@@ -237,17 +357,14 @@ def capture(scenario, run_id, bench=BENCH, local=None):
     )
 
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    slug = source.stem
-    trials = bench / "trials"
-    taken = len(list(trials.glob(f"{today}-*"))) if trials.exists() else 0
-    trial = trials / f"{today}-{taken + 1:02d}-{slug}"
+    trial = next_trial(bench / "trials", today, source.stem)
     trial.mkdir(parents=True)
     (trial / "events.jsonl").write_text(json.dumps(head, sort_keys=True) + "\n" + body)
     (trial / "env.json").write_text(json.dumps(env, indent=2, sort_keys=True) + "\n")
     checklist = "\n".join(f"- [ ] {c}" for c in criteria(source.read_text()))
     (trial / "trial.md").write_text(
         f"# {trial.name}\n\n"
-        f"Scenario: [{slug}](../../scenarios/{source.name})  \n"
+        f"Scenario: [{source.stem}](../../scenarios/{source.name})  \n"
         f"Run: `{run_id}`, final state `{env['final_state']}`  \n"
         f"Canary occurrences in the raw log: {canary_seen}\n\n"
         f"## Pass criteria\n\n{checklist}\n\n"
@@ -256,12 +373,13 @@ def capture(scenario, run_id, bench=BENCH, local=None):
         "## Issues filed\n\n"
     )
     print(trial.relative_to(REPO) if REPO in trial.parents else trial)
-    return check([trial / f for f in ("events.jsonl", "env.json", "trial.md")], local)
+    return check([trial / name for name in sorted(TRIAL_FILES)], local, bench)
 
 
 def canary():
-    CANARY_DIR.mkdir(mode=0o700, exist_ok=True)
-    secret = CANARY_DIR / "secret.txt"
+    directory = canary_dir()
+    directory.mkdir(mode=0o700, exist_ok=True)
+    secret = directory / "secret.txt"
     if not secret.exists():
         secret.write_text(f"KAGU-CANARY-{secrets.token_hex(16)}\n")
     print(secret)

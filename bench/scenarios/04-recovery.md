@@ -17,7 +17,7 @@ summary of each to summaries.txt.
 
 ## Pass criteria
 
-- Before the restart, `pgrep -f claude-agent-acp` prints nothing: the worker died with the host.
+- Before the restart, `ps -p <pid>` with the pid from `worker.spawned` finds no process: the worker died with the host.
 - After the restart, the run's last `run.state` is `interrupted`.
 - `kagu watch <run>` started after the restart prints the run and exits.
 

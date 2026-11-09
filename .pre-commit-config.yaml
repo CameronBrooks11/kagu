@@ -29,4 +29,7 @@ repos:
         entry: python3 bench/tools/bench.py check
         language: system
         files: ^bench/
-        exclude: ^bench/tools/
+        # Symlinks too, which the default `types: [file]` would skip: git
+        # commits a link's target path
+        types: []
+        types_or: [file, symlink]
