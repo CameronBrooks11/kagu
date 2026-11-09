@@ -314,8 +314,8 @@ as gaps.
 ## Grant
 
 A Grant is data: filesystem paths (`ro` | `rw`), network (`off` | `host` |
-`allow-list`), environment and credential references, resource limits. The host compiles it
-to a substrate.
+`allow-list`), environment and credential references, resource limits. The
+host compiles it to a substrate.
 
 ### Enforcement levels
 
