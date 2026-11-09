@@ -19,6 +19,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       tla: ${{ steps.filter.outputs.tla }}
+      bench: ${{ steps.filter.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -33,6 +34,8 @@ jobs:
             tla:
               - 'tla/**'
               - '.github/workflows/ci.yml'
+            bench:
+              - 'bench/**'
 
   check:
     needs: [changes]
@@ -73,6 +76,18 @@ jobs:
           bwrap --version
       - run: just test-integration
 
+  # Any change under bench/, a hand-edited trial.md included, is checked for
+  # identifiers and edited logs whatever the code filter decides
+  bench:
+    needs: [changes]
+    if: needs.changes.outputs.bench == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 bench/tools/bench.py check
+      - run: python3 -m unittest discover -q -s bench/tools
+
   # About 15 minutes, mostly liveness; runs only when tla/ or this file changes
   tla:
     needs: [changes]
@@ -93,7 +108,7 @@ jobs:
 
   ok:
     if: always()
-    needs: [changes, check, test, integration, tla]
+    needs: [changes, check, test, integration, bench, tla]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
