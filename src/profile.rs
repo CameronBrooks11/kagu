@@ -85,6 +85,18 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
             return Err(format!("grant path {path:?} is not absolute"));
         }
     }
+    // A read-only path is mounted over the writable ones, so one that
+    // contains a writable path would make it read-only.
+    for ro in &profile.grant.ro {
+        if let Some(rw) = profile
+            .grant
+            .rw
+            .iter()
+            .find(|rw| Path::new(rw).starts_with(ro))
+        {
+            return Err(format!("grant: ro path {ro:?} contains rw path {rw:?}"));
+        }
+    }
     for (name, reference) in &profile.worker.env {
         reference_var(reference).ok_or_else(|| {
             format!("worker.env.{name}: {reference:?} is not a reference (expected env:NAME)")

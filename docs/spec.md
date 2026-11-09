@@ -354,7 +354,11 @@ Landlock to itself with every right the host's probe found, refuses to run
 the worker if the ruleset is not fully enforced, writes a readiness line to
 stderr, and execs the worker. Landlock comes last because a
 Landlock-restricted process cannot mount. A run reaches `working` only after
-that line; a sandbox that fails to start rejects the run. The host probes
+that line; a sandbox that fails to start rejects the run. A worker program
+that starts but cannot run (an interpreter missing from the sandbox, say)
+ends `failed`, reason `exited`, with its stderr in the log. A grant whose
+`ro` path contains the workspace or an `rw` path is rejected, since it would
+make that path read-only. The host probes
 on first use, by running `sandbox-init --probe` inside `bwrap`: one call
 shows both that a user namespace can be created and which Landlock ABI is in
 force. A successful probe is kept; a failed one is retried by the next run.

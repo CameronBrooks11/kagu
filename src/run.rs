@@ -74,6 +74,13 @@ fn stop(reason: &str) -> (State, Option<Reason>) {
     }
 }
 
+/// How a sandbox's start ended.
+enum Sandbox {
+    Ready,
+    Failed(String),
+    Canceled,
+}
+
 struct Actor<'a> {
     id: String,
     log: &'a Log,
@@ -302,19 +309,23 @@ impl Actor<'_> {
 
     /// Wait for `sandbox-init` to report the sandbox built. Until then the
     /// worker has not started, so a failure here rejects the run.
-    fn await_sandbox(&mut self) -> Result<Result<(), String>, String> {
+    fn await_sandbox(&mut self) -> Result<Sandbox, String> {
         let deadline = Instant::now() + GRACE * 5;
         let mut said = Vec::new();
         loop {
+            if self.cancel.requested() {
+                return Ok(Sandbox::Canceled);
+            }
             let conn = self.worker.as_ref().expect("worker started");
-            let msg = conn.recv_until(deadline).map(|m| self.clean(m));
-            match msg {
+            // Matched before redaction, which a short secret could alter.
+            let msg = match conn.recv_until(deadline) {
                 Some(Msg::Raw {
                     stream: "stderr",
                     text,
-                }) if text == substrate::READY => {
-                    return Ok(Ok(()));
-                }
+                }) if text == substrate::READY => return Ok(Sandbox::Ready),
+                other => other.map(|m| self.clean(m)),
+            };
+            match msg {
                 Some(Msg::Raw { stream, text }) => {
                     said.push(text.clone());
                     self.raw(stream, text)?;
@@ -330,12 +341,12 @@ impl Actor<'_> {
                     } else {
                         said.join("; ")
                     };
-                    return Ok(Err(format!("the sandbox did not start: {why}")));
+                    return Ok(Sandbox::Failed(format!("the sandbox did not start: {why}")));
                 }
             }
             if self.exit.is_some() && self.stderr_closed {
                 let why = said.join("; ");
-                return Ok(Err(format!("the sandbox did not start: {why}")));
+                return Ok(Sandbox::Failed(format!("the sandbox did not start: {why}")));
             }
         }
     }
@@ -375,6 +386,13 @@ impl Actor<'_> {
             env.push((name.clone(), value));
         }
         let grant = &loaded.profile.grant;
+        if let Some(ro) = grant
+            .ro
+            .iter()
+            .find(|ro| Path::new(&task.workspace).starts_with(ro))
+        {
+            return self.reject(format!("grant: ro path {ro:?} contains the workspace"));
+        }
         let probe = (grant.substrate == Substrate::Bwrap).then(substrate::probe);
         let levels = match substrate::levels(grant, probe.as_ref()) {
             Ok(l) => l,
@@ -427,10 +445,12 @@ impl Actor<'_> {
         *self.cancel.waker.lock().expect("waker lock") = Some(conn.waker());
         self.worker = Some(conn);
         self.log(Source::Host, &WorkerSpawned { pid })?;
-        if probe.is_some()
-            && let Err(e) = self.await_sandbox()?
-        {
-            return self.reject(e);
+        if probe.is_some() {
+            match self.await_sandbox()? {
+                Sandbox::Ready => {}
+                Sandbox::Failed(e) => return self.reject(e),
+                Sandbox::Canceled => return self.to(State::Canceled, None, None),
+            }
         }
         self.to(State::Working, None, None)?;
 
