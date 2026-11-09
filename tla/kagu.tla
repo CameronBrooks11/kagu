@@ -103,7 +103,7 @@ Submit(r) ==
 
 \* Admission locks the workspace and starts the worker.
 Admit(r) ==
-    /\ Ready /\ st[r] = "submitted"
+    /\ Ready /\ st[r] = "submitted" /\ ~Conflict(r)
     /\ Move(r, "working")
     /\ proc' = [proc EXCEPT ![r] = "alive"]
     /\ UNCHANGED <<released, attested, up, crashes, recovering>> /\ UNCHANGED client
