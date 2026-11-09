@@ -1,0 +1,113 @@
+{
+  "params": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Params of `log.subscribe`.",
+    "properties": {
+      "after": {
+        "description": "Stream events after this seq instead of after the snapshot's.",
+        "format": "int64",
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "title": "Subscribe",
+    "type": "object"
+  },
+  "result": {
+    "$defs": {
+      "Reason": {
+        "description": "Why a run ended `failed` or `rejected`.",
+        "enum": [
+          "auth_required",
+          "error",
+          "exited",
+          "limit",
+          "refusal",
+          "unknown_stop_reason",
+          "unrequested_cancel"
+        ],
+        "type": "string"
+      },
+      "RunView": {
+        "description": "What a run's events say about it.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Reason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/State"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verdict": {
+            "$ref": "#/$defs/Verdict"
+          }
+        },
+        "required": [
+          "verdict"
+        ],
+        "type": "object"
+      },
+      "State": {
+        "description": "Run lifecycle states (spec: Run lifecycle).",
+        "enum": [
+          "submitted",
+          "working",
+          "input_required",
+          "checking",
+          "completed",
+          "failed",
+          "canceled",
+          "rejected",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "Verdict": {
+        "enum": [
+          "pass",
+          "fail",
+          "error",
+          "not_run"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Result of `log.subscribe`: the non-terminal runs and the seq they reflect,\nread together. Events then follow as `log.event` notifications.",
+    "properties": {
+      "runs": {
+        "additionalProperties": {
+          "$ref": "#/$defs/RunView"
+        },
+        "type": "object"
+      },
+      "seq": {
+        "format": "int64",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "runs",
+      "seq"
+    ],
+    "title": "Snapshot",
+    "type": "object"
+  }
+}

@@ -212,7 +212,7 @@ Restart ==
     /\ recovering' = TRUE
     /\ UNCHANGED <<st, proc, released, attested, log, crashes>> /\ UNCHANGED client
 
-\* Recovery: each non-terminal run's actor records run.interrupted. Nothing
+\* Recovery: each non-terminal run's actor records interrupted. Nothing
 \* about the worker's end is recorded (invariant 9).
 Interrupt(r) ==
     /\ up /\ recovering /\ st[r] \in NonTerminal

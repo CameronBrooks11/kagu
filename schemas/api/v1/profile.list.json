@@ -1,0 +1,27 @@
+{
+  "params": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Params of methods that take none.",
+    "title": "NoParams",
+    "type": "object"
+  },
+  "result": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Result of `profile.list`.",
+    "properties": {
+      "profiles": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "profiles"
+    ],
+    "title": "Profiles",
+    "type": "object"
+  }
+}

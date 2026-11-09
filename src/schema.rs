@@ -19,7 +19,15 @@ fn named<T: JsonSchema>(path: &str) -> (String, Value) {
 
 /// Every committed schema, as (path under `schemas/`, schema).
 pub fn all() -> Vec<(String, Value)> {
-    vec![
+    let api = crate::api::methods()
+        .into_iter()
+        .map(|(method, params, result)| {
+            (
+                format!("api/v{}/{method}.json", crate::api::VERSION),
+                serde_json::json!({"params": params, "result": result}),
+            )
+        });
+    let mut all = vec![
         named::<Event>("envelope.v1.json"),
         named::<Profile>("profile.v1.json"),
         event::<TaskSubmitted>(),
@@ -33,5 +41,7 @@ pub fn all() -> Vec<(String, Value)> {
         event::<WorkerUpdate>(),
         event::<WorkerRaw>(),
         event::<WorkerExited>(),
-    ]
+    ];
+    all.extend(api);
+    all
 }

@@ -434,3 +434,29 @@ fn recovery_interrupts_unfinished_runs_only() {
     drop(log);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_second_host_on_a_live_log_is_refused_before_it_writes() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "end_turn", "");
+    let db = dir.join("kagu.db");
+    // The first host: holds the lock, with a run it has not finished.
+    let _lock = kagu::host::lock_db(&db).unwrap();
+    let log = Log::open(&db).unwrap();
+    let id = run::submit(&log, task(&dir, &p)).unwrap();
+    let before = log.events(&id).unwrap();
+    let second = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .arg("serve")
+        .arg("--db")
+        .arg(&db)
+        .arg("--socket")
+        .arg(dir.join("second.sock"))
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(stderr.contains("another kagu host"), "{stderr}");
+    assert_eq!(log.events(&id).unwrap(), before, "the second host wrote");
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

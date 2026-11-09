@@ -113,7 +113,11 @@ fn cli(args: Vec<String>) -> Result<ExitCode, String> {
             args.only(&["socket"])?;
             let run = args.positional.first().ok_or(USAGE)?;
             let mut out = Render::new(args.json);
-            for e in read(&mut args.connect()?, run)? {
+            let events = read(&mut args.connect()?, run)?;
+            if events.is_empty() {
+                return Err(format!("no run {run}"));
+            }
+            for e in events {
                 out.event(&e);
             }
             out.end();
@@ -195,6 +199,9 @@ fn watch(args: &Args) -> Result<ExitCode, String> {
     // history is read even with a cursor, because whether the run has ended
     // depends on events before it; only events after the cursor are printed.
     let history = read(&mut args.connect()?, run)?;
+    if history.is_empty() {
+        return Err(format!("no run {run}"));
+    }
     let from = history
         .last()
         .map(|e| e.seq)
@@ -228,7 +235,9 @@ fn follow(
             "worker.exited" => exited = true,
             _ => {}
         }
-        if state.is_some_and(State::is_terminal) && (exited || !spawned) {
+        // No exit follows an interrupted run: the host did not observe one.
+        let no_exit_coming = !spawned || state == Some(State::Interrupted);
+        if state.is_some_and(State::is_terminal) && (exited || no_exit_coming) {
             out.end();
             return Ok(if state == Some(State::Completed) {
                 ExitCode::SUCCESS
@@ -305,5 +314,50 @@ impl Render {
             "worker.exited" => self.line(&format!("· worker exited {d}")),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Render, follow};
+    use kagu::event::{Event, Source};
+    use serde_json::json;
+
+    fn ev(seq: i64, run: &str, kind: &str, data: serde_json::Value) -> Result<Event, String> {
+        Ok(Event {
+            seq,
+            run: run.into(),
+            ts: String::new(),
+            source: Source::Host,
+            kind: kind.into(),
+            v: 1,
+            data,
+        })
+    }
+
+    /// An interrupted run has no recorded exit, so following it must stop at
+    /// the interruption, not wait for an exit that will never come.
+    #[test]
+    fn follow_stops_at_an_interrupted_run() {
+        let events = vec![
+            ev(1, "r", "run.state", json!({"to": "submitted"})),
+            ev(2, "r", "worker.spawned", json!({"pid": 1})),
+            ev(3, "r", "run.state", json!({"to": "working"})),
+            ev(4, "r", "run.state", json!({"to": "interrupted"})),
+            Err("followed past the end".into()),
+        ];
+        let code = follow("r", events.into_iter(), Render::new(true), 0).unwrap();
+        assert_eq!(code, std::process::ExitCode::FAILURE);
+    }
+
+    /// A finished run that spawned a worker is followed until its exit.
+    #[test]
+    fn follow_waits_for_the_worker_exit() {
+        let events = vec![
+            ev(1, "r", "worker.spawned", json!({"pid": 1})),
+            ev(2, "r", "run.state", json!({"to": "completed"})),
+            Err("stopped before worker.exited".into()),
+        ];
+        assert!(follow("r", events.into_iter(), Render::new(true), 0).is_err());
     }
 }

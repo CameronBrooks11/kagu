@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::api::Snapshot;
 use crate::event::{Event, RunView, Source};
 use crate::store::Store;
 
@@ -26,12 +27,6 @@ struct Inner {
 pub struct Log {
     inner: Mutex<Inner>,
     appended: Condvar,
-}
-
-/// The non-terminal runs and the seq their states reflect.
-pub struct Snapshot {
-    pub runs: BTreeMap<String, RunView>,
-    pub seq: i64,
 }
 
 impl Log {
@@ -137,29 +132,39 @@ mod tests {
     use super::Log;
     use crate::event::Source;
 
-    /// A subscriber that takes a snapshot while others append, then follows
-    /// from its seq, sees every later event exactly once and in order.
+    /// A subscriber that snapshots, then follows while others append, sees
+    /// every later event exactly once and in order.
     #[test]
     fn snapshot_then_follow_misses_and_repeats_nothing() {
         let path = std::env::temp_dir().join(format!("kagu-log-{}.db", std::process::id()));
         let log = Arc::new(Log::open(&path).unwrap());
+        // Writers append a first batch, wait for the snapshot, then append
+        // a second batch while the subscriber follows.
+        let first = Arc::new(std::sync::Barrier::new(5));
+        let snapshotted = Arc::new(std::sync::Barrier::new(5));
         let writers: Vec<_> = (0..4)
             .map(|w| {
-                let log = Arc::clone(&log);
+                let (log, first, snapshotted) = (
+                    Arc::clone(&log),
+                    Arc::clone(&first),
+                    Arc::clone(&snapshotted),
+                );
                 std::thread::spawn(move || {
+                    let run = format!("r{w}");
                     for i in 0..200 {
-                        let run = format!("r{w}");
+                        if i == 100 {
+                            first.wait();
+                            snapshotted.wait();
+                        }
                         log.append(&run, Source::Host, "test.tick", 1, json!(i))
                             .unwrap();
                     }
                 })
             })
             .collect();
-        // Snapshot mid-stream: after some appends, before all of them.
-        while log.snapshot().seq < 50 {
-            std::thread::yield_now();
-        }
+        first.wait();
         let snapshot = log.snapshot();
+        snapshotted.wait();
         let mut seen = Vec::new();
         let mut cursor = snapshot.seq;
         loop {
@@ -186,10 +191,7 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
-        assert!(
-            expected.len() < 800,
-            "snapshot was taken after every append"
-        );
+        assert_eq!(expected.len(), 400, "the second batch follows the snapshot");
         assert_eq!(seen, expected);
     }
 }

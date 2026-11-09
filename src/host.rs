@@ -12,12 +12,13 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::api;
 use crate::event::{State, TaskSubmitted};
 use crate::log::Log;
 use crate::run::{self, Cancel};
-
-/// Version of the client API, reported by `host.status`.
-pub const API_VERSION: u32 = 1;
 
 struct Host {
     log: Arc<Log>,
@@ -35,18 +36,40 @@ fn failed(e: impl ToString) -> RpcError {
     (-32000, e.to_string())
 }
 
-fn run_param(params: &Value) -> Result<String, RpcError> {
-    params
-        .get("run")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| invalid("missing \"run\""))
+fn params<P: DeserializeOwned>(params: &Value) -> Result<P, RpcError> {
+    // A method that takes none may be sent no params at all.
+    let params = if params.is_null() {
+        json!({})
+    } else {
+        params.clone()
+    };
+    serde_json::from_value(params).map_err(invalid)
+}
+
+fn result<R: Serialize>(r: R) -> Result<Value, RpcError> {
+    Ok(serde_json::to_value(r).expect("result serializes"))
+}
+
+/// Removes a run from `active` when its thread ends, by return or by panic.
+struct Active {
+    runs: Arc<Mutex<BTreeMap<String, Arc<Cancel>>>>,
+    id: String,
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        runs.remove(&self.id);
+    }
 }
 
 pub fn serve(db: &Path, socket: &Path) -> Result<(), String> {
+    // Exclusive before anything touches the log, so a second host cannot
+    // mark a live host's runs interrupted. Held while serving.
+    let _lock = lock_db(db)?;
+    let listener = bind(socket)?;
     let log = Arc::new(Log::open(db)?);
     recover(&log)?;
-    let listener = bind(socket)?;
     eprintln!("kagu: serving on {}", socket.display());
     let host = Arc::new(Host {
         log,
@@ -68,6 +91,25 @@ pub fn recover(log: &Log) -> Result<(), String> {
     Ok(())
 }
 
+/// One host per log: an exclusive lock on `<db>.lock`, released when the
+/// returned file is dropped or the process ends.
+pub fn lock_db(db: &Path) -> Result<std::fs::File, String> {
+    let path = std::path::PathBuf::from(format!("{}.lock", db.display()));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err(format!("another kagu host is using {}", db.display()))
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 /// A private socket: its directory is 0700 and the socket 0600.
 fn bind(socket: &Path) -> Result<UnixListener, String> {
     let dir = socket.parent().ok_or("socket path has no directory")?;
@@ -75,6 +117,9 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
         .recursive(true)
         .mode(0o700)
         .create(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    // `create` leaves an existing directory's mode alone.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
@@ -137,31 +182,46 @@ impl Host {
         }
     }
 
-    fn call(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+    fn call(&self, method: &str, p: &Value) -> Result<Value, RpcError> {
         match method {
             "task.submit" => {
-                let task: TaskSubmitted =
-                    serde_json::from_value(params.clone()).map_err(invalid)?;
+                let task: TaskSubmitted = params(p)?;
                 let run = run::submit(&self.log, task).map_err(failed)?;
-                Ok(json!({ "run": run }))
+                result(api::Submitted { run })
             }
-            "run.start" => self.start(run_param(params)?).map(|()| json!({})),
-            "run.cancel" => self.cancel(&run_param(params)?).map(|()| json!({})),
+            "run.start" => {
+                self.start(params::<api::RunRef>(p)?.run)?;
+                result(api::Done {})
+            }
+            "run.cancel" => {
+                self.cancel(&params::<api::RunRef>(p)?.run)?;
+                result(api::Done {})
+            }
             "log.read" => {
-                let events = self.log.events(&run_param(params)?).map_err(failed)?;
-                Ok(json!({ "events": events }))
+                let run = params::<api::RunRef>(p)?.run;
+                let events = self.log.events(&run).map_err(failed)?;
+                result(api::Events { events })
             }
             "host.status" => {
-                let active: Vec<String> = self
+                params::<api::NoParams>(p)?;
+                let active = self
                     .active
                     .lock()
                     .expect("active lock")
                     .keys()
                     .cloned()
                     .collect();
-                Ok(json!({"api": API_VERSION, "active": active}))
+                result(api::Status {
+                    api: api::VERSION,
+                    active,
+                })
             }
-            "profile.list" => Ok(json!({ "profiles": profiles().map_err(failed)? })),
+            "profile.list" => {
+                params::<api::NoParams>(p)?;
+                result(api::Profiles {
+                    profiles: profiles().map_err(failed)?,
+                })
+            }
             _ => Err((-32601, format!("method not found: {method}"))),
         }
     }
@@ -177,10 +237,13 @@ impl Host {
         drop(active);
         let (log, active) = (Arc::clone(&self.log), Arc::clone(&self.active));
         thread::spawn(move || {
+            let _active = Active {
+                runs: active,
+                id: id.clone(),
+            };
             if let Err(e) = run::start(&log, &id, &cancel, &|k| std::env::var(k).ok()) {
                 eprintln!("kagu: run {id}: {e}");
             }
-            active.lock().expect("active lock").remove(&id);
         });
         Ok(())
     }
@@ -198,16 +261,25 @@ impl Host {
         Err(failed(format!("run {id} is not active")))
     }
 
-    fn subscribe(&self, out: &mut UnixStream, id: Value, params: &Value) {
-        let snapshot = self.log.snapshot();
-        let mut cursor = params
-            .get("after")
-            .and_then(Value::as_i64)
-            .unwrap_or(snapshot.seq);
-        let result = json!({"runs": snapshot.runs, "seq": snapshot.seq});
-        if !send(out, &json!({"jsonrpc": "2.0", "id": id, "result": result})) {
-            return;
-        }
+    fn subscribe(&self, out: &mut UnixStream, id: Value, p: &Value) {
+        let reply = params::<api::Subscribe>(p).and_then(|sub| {
+            let snapshot = self.log.snapshot();
+            let cursor = sub.after.unwrap_or(snapshot.seq);
+            result(snapshot).map(|r| (r, cursor))
+        });
+        let mut cursor = match reply {
+            Ok((r, cursor)) => {
+                if !send(out, &json!({"jsonrpc": "2.0", "id": id, "result": r})) {
+                    return;
+                }
+                cursor
+            }
+            Err((code, message)) => {
+                let err = json!({"code": code, "message": message});
+                send(out, &json!({"jsonrpc": "2.0", "id": id, "error": err}));
+                return;
+            }
+        };
         loop {
             let Ok(events) = self.log.after(cursor, Duration::from_secs(5)) else {
                 return;

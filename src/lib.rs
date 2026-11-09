@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod api;
 pub mod client;
 pub mod event;
 pub mod host;
