@@ -44,6 +44,7 @@ canary:
 
 # Tests that need a unix socket or user namespaces, which an agent sandbox
 # may refuse: CI and a local terminal
+[doc("Tests that need a unix socket or user namespaces (CI, a local terminal)")]
 test-integration:
     cargo test --test cli --test sandbox -- --ignored
 
