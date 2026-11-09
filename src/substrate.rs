@@ -177,7 +177,9 @@ pub fn command(
     if grant.network == Network::Host {
         c.arg("--share-net");
     }
-    c.arg("--disable-userns");
+    // `--unshare-all` only tries the user namespace; `--disable-userns`
+    // needs it made explicit.
+    c.args(["--unshare-user", "--disable-userns"]);
     c.args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
     for dir in SYSTEM_RO {
         if Path::new(dir).exists() {
