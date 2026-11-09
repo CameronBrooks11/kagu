@@ -56,6 +56,13 @@
         }
       ]
     },
+    "PromptMode": {
+      "enum": [
+        "append",
+        "override"
+      ],
+      "type": "string"
+    },
     "Substrate": {
       "oneOf": [
         {
@@ -69,6 +76,22 @@
           "type": "string"
         }
       ]
+    },
+    "SystemPrompt": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/PromptMode"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "text"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -111,6 +134,13 @@
       },
       "type": "object"
     },
+    "meta": {
+      "additionalProperties": true,
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "profile": {
       "description": "The profile, as named in the task.",
       "type": "string"
@@ -121,6 +151,17 @@
     },
     "substrate": {
       "type": "string"
+    },
+    "system_prompt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SystemPrompt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The worker settings passed on `session/new`."
     }
   },
   "required": [

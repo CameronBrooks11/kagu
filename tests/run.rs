@@ -555,21 +555,12 @@ fn run_with_state(dir: &Path, profile: &Path, state: &Path) -> Vec<Event> {
     log.events(&id).unwrap()
 }
 
-#[test]
-fn auth_signs_the_worker_in_to_its_own_home() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = scratch();
-    let state = dir.join("state");
-    let p = home_profile(&dir, "authstub", "auth", "");
-    // Before sign-in the worker asks for authentication.
-    let before = Outcome {
-        stored: run_with_state(&dir, &p, &state),
-    };
-    expect(&before, State::Failed, Some(Reason::AuthRequired));
+/// `kagu auth` against `profile` with `state` as XDG_STATE_HOME.
+fn auth_cli(profile: &Path, state: &Path) {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
         .args(["auth"])
-        .arg(&p)
-        .env("XDG_STATE_HOME", &state)
+        .arg(profile)
+        .env("XDG_STATE_HOME", state)
         .output()
         .unwrap();
     assert!(
@@ -577,14 +568,39 @@ fn auth_signs_the_worker_in_to_its_own_home() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let home = state.join("kagu/homes/authstub");
+}
+
+/// The stub's report of what it found in its home.
+fn home_report(events: &[Event]) -> serde_json::Value {
+    let update = events.iter().find(|e| e.kind == "worker.update").unwrap();
+    serde_json::from_str(update.data["content"]["text"].as_str().unwrap()).unwrap()
+}
+
+const PIN: &str = "[worker.home_files]\n\"settings.json\" = \"{}\"\n";
+
+#[test]
+fn auth_signs_the_worker_in_to_its_own_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch();
+    let p = home_profile(&dir, "authstub", "auth", PIN);
+    // Before sign-in the worker asks for authentication.
+    let before = Outcome {
+        stored: run_with_state(&dir, &p, &dir.join("unsigned")),
+    };
+    expect(&before, State::Failed, Some(Reason::AuthRequired));
+    // Sign-in creates the home itself.
+    let state = dir.join("state");
+    auth_cli(&p, &state);
+    let home = state
+        .join("kagu/homes")
+        .join(kagu::profile::home_key(&p).unwrap());
     assert_eq!(
         std::fs::read_to_string(home.join("credentials")).unwrap(),
         "t0k"
     );
     let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700);
-    // After it, the same profile runs.
+    // After it, the same profile runs in that home.
     let after = Outcome {
         stored: run_with_state(&dir, &p, &state),
     };
@@ -595,6 +611,82 @@ fn auth_signs_the_worker_in_to_its_own_home() {
         .find(|e| e.kind == "run.admitted")
         .unwrap();
     assert_eq!(admitted.data["home"], home.to_str().unwrap());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn home_files_are_rewritten_before_every_run() {
+    let dir = scratch();
+    let state = dir.join("state");
+    let p = home_profile(&dir, "pinned", "auth", PIN);
+    auth_cli(&p, &state);
+    // Unconfined, the first run can plant over the file...
+    let first = run_with_state(&dir, &p, &state);
+    assert_eq!(home_report(&first)["settings"], "{}");
+    assert_eq!(home_report(&first)["planted"], true);
+    // ...but the next run starts from what the profile says.
+    let second = run_with_state(&dir, &p, &state);
+    assert_eq!(home_report(&second)["settings"], "{}");
+    // A link left in its place is replaced, not followed.
+    let home = state
+        .join("kagu/homes")
+        .join(kagu::profile::home_key(&p).unwrap());
+    let target = dir.join("target");
+    std::fs::write(&target, "keep").unwrap();
+    std::fs::remove_file(home.join("settings.json")).unwrap();
+    std::os::unix::fs::symlink(&target, home.join("settings.json")).unwrap();
+    let third = run_with_state(&dir, &p, &state);
+    assert_eq!(home_report(&third)["settings"], "{}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn profiles_with_one_file_name_get_different_homes() {
+    let dir = scratch();
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    let a = home_profile(&dir.join("a"), "same", "end_turn", "");
+    let b = home_profile(&dir.join("b"), "same", "end_turn", "");
+    let state = dir.join("state");
+    let home = |p: &Path| {
+        let events = run_with_state(&dir, p, &state);
+        let admitted = events.iter().find(|e| e.kind == "run.admitted").unwrap();
+        admitted.data["home"].as_str().unwrap().to_string()
+    };
+    assert_ne!(home(&a), home(&b));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_grant_that_makes_the_home_read_only_is_rejected() {
+    let dir = scratch();
+    let state = dir.join("state");
+    let ro = format!("[grant]\nro = [{:?}]\n", state.to_str().unwrap());
+    // home_profile writes its own [grant]; this one replaces it.
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    let p = dir.join("rohome.toml");
+    std::fs::write(
+        &p,
+        format!("version = 1\n{ro}substrate = \"none\"\n[worker]\ncommand = [{stub:?}, \"end_turn\"]\nhome_env = [\"STUB_HOME\"]\n"),
+    )
+    .unwrap();
+    let o = Outcome {
+        stored: run_with_state(&dir, &p, &state),
+    };
+    expect(&o, State::Rejected, Some(Reason::Error));
+    let last = o
+        .stored
+        .iter()
+        .rev()
+        .find(|e| e.kind == "run.state")
+        .unwrap();
+    assert!(
+        last.data["detail"]
+            .as_str()
+            .unwrap()
+            .contains("contains the harness home")
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -615,6 +707,11 @@ fn system_prompt_and_meta_reach_the_worker() {
         serde_json::json!([])
     );
     let admitted = events.iter().find(|e| e.kind == "run.admitted").unwrap();
+    assert_eq!(admitted.data["system_prompt"]["text"], "be terse");
+    assert_eq!(
+        admitted.data["meta"]["claudeCode"]["options"]["settingSources"],
+        serde_json::json!([])
+    );
     for setting in ["system_prompt", "meta", "home_isolation"] {
         assert_eq!(admitted.data["levels"][setting], "advisory", "{setting}");
     }

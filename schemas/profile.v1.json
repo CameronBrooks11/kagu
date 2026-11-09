@@ -108,6 +108,14 @@
           },
           "type": "array"
         },
+        "home_files": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Files kagu writes at the top of the home before every run, by name,\nand mounts read-only under bwrap: for configuration the harness reads\nfrom its home whatever it is told (spec: Harness home).",
+          "type": "object"
+        },
         "meta": {
           "additionalProperties": true,
           "default": null,
