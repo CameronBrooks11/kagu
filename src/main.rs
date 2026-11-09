@@ -170,7 +170,7 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         .to_string();
     eprintln!("kagu: run {run} (detach with Ctrl-C; `kagu cancel {run}` to stop it)");
     control.call("run.start", json!({ "run": run }))?;
-    follow(&run, events, Render::new(args.json))
+    follow(&run, events, Render::new(args.json), 0)
 }
 
 fn read(client: &mut Client, run: &str) -> Result<Vec<Event>, String> {
@@ -191,22 +191,27 @@ fn watch(args: &Args) -> Result<ExitCode, String> {
         }
         return Ok(ExitCode::SUCCESS);
     };
-    // History first, then everything after it: no gap, no repeat.
-    let history = match after {
-        Some(_) => Vec::new(),
-        None => read(&mut args.connect()?, run)?,
-    };
-    let from = history.last().map(|e| e.seq).or(after).unwrap_or(0);
+    // History first, then everything after it: no gap, no repeat. The whole
+    // history is read even with a cursor, because whether the run has ended
+    // depends on events before it; only events after the cursor are printed.
+    let history = read(&mut args.connect()?, run)?;
+    let from = history
+        .last()
+        .map(|e| e.seq)
+        .unwrap_or(0)
+        .max(after.unwrap_or(0));
     let (_, events) = args.connect()?.subscribe(Some(from))?;
     let history = history.into_iter().map(Ok);
-    follow(run, history.chain(events), out)
+    follow(run, history.chain(events), out, after.unwrap_or(0))
 }
 
-/// Print a run's events until it has ended and its worker is gone.
+/// Follow a run's events until it has ended and its worker is gone,
+/// printing those after `print_after`.
 fn follow(
     run: &str,
     events: impl Iterator<Item = Result<Event, String>>,
     mut out: Render,
+    print_after: i64,
 ) -> Result<ExitCode, String> {
     let (mut state, mut spawned, mut exited) = (None, false, false);
     for e in events {
@@ -214,7 +219,9 @@ fn follow(
         if e.run != run {
             continue;
         }
-        out.event(&e);
+        if e.seq > print_after {
+            out.event(&e);
+        }
         match e.kind.as_str() {
             "run.state" => state = serde_json::from_value::<State>(e.data["to"].clone()).ok(),
             "worker.spawned" => spawned = true,
