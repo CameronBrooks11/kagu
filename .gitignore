@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # TLC output
 tla/states/
 tla/*_TTrace_*
+
+# Python bytecode from bench/tools
+__pycache__/

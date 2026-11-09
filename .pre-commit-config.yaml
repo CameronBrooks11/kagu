@@ -22,3 +22,11 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+
+      # Trial records are public: no identifier, secret or edited log
+      - id: bench-check
+        name: bench files are safe to commit
+        entry: python3 bench/tools/bench.py check
+        language: system
+        files: ^bench/
+        exclude: ^bench/tools/
