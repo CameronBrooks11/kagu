@@ -20,9 +20,10 @@ fmt-check:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
-# CI-equivalent: format check, lint, committed schemas current
+# CI-equivalent: format check, lint, committed schemas current, bench safe
 check: fmt-check lint
     cargo test -q --test schemas
+    python3 bench/tools/bench.py check
 
 # Regenerate the committed schemas from the types
 schemas:
@@ -31,9 +32,19 @@ schemas:
 # Tests that run anywhere; the ignored ones need test-integration
 test:
     cargo test
+    python3 -m unittest discover -q -s bench/tools
+
+# Record a trial of a bench scenario from a run that has ended
+trial scenario run:
+    python3 bench/tools/bench.py capture {{scenario}} {{run}}
+
+# Plant the canary secret that bench scenario 05 reads
+canary:
+    python3 bench/tools/bench.py canary
 
 # Tests that need a unix socket or user namespaces, which an agent sandbox
 # may refuse: CI and a local terminal
+[doc("Tests that need a unix socket or user namespaces (CI, a local terminal)")]
 test-integration:
     cargo test --test cli --test sandbox -- --ignored
 
