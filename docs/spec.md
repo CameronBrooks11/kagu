@@ -8,8 +8,9 @@ kagu is a host. It accepts tasks, starts harnesses as worker processes,
 confines them, records what they report, and records whether their result
 was verified.
 
-kagu does not implement an agent loop, call a model, implement tools, or route
-work between models. A minimal native loop is a worker like any other.
+kagu does not implement an agent loop, call a model, implement tools, route
+work between models, or authenticate to a model provider. A minimal native
+loop is a worker like any other. v1 targets Linux.
 
 ```mermaid
 flowchart TB
@@ -61,16 +62,20 @@ flowchart TB
 
 | Noun    | Is                                                                      | Lifetime        |
 | ------- | ----------------------------------------------------------------------- | --------------- |
-| Profile | Configured worker: harness command, instructions, model hint, grant, checks | config, versioned |
-| Task    | Immutable intent: profile name, input, workspace, checks                 | until deleted   |
+| Profile | Configured worker: harness command, auth, instructions, model hint, grant, checks; owns a harness home | config, versioned |
+| Task    | Immutable intent: profile name, input, workspace directory, checks, optional `thread` | until deleted   |
 | Run     | One attempt at a task by one worker, bound to its resolved configuration | to a terminal state |
 | Event   | Append-only record of something that happened to a run                   | forever         |
 | Grant   | Authority a run's worker holds; credentials by reference, never by value | one run         |
 | Check   | Command whose exit status contributes to the run's verdict               | one run         |
 
 A retry is a new Run of the same Task. A harness's own session id is a field
-of the Run, used to resume; kagu has no session object of its own (see open
-questions).
+of the Run, used to resume; kagu has no session object of its own. `thread`
+is an opaque label clients may group Tasks by; kagu attaches no behaviour to
+it.
+
+The workspace is a directory the caller names. kagu locks it (invariant 8)
+and grants it; it does not create, clone or otherwise manage it.
 
 ## Invariants
 
@@ -143,7 +148,8 @@ A Run sends one ACP `session/prompt`. Its response ends execution:
 | `max_turn_requests`              | `failed`    | `limit`               |
 | `refusal`                        | `failed`    | `refusal`             |
 | any other stop reason            | `failed`    | `unknown_stop_reason` |
-| JSON-RPC error                   | `failed`    | `error`               |
+| ACP auth-required error (`-32000`) | `failed`  | `auth_required`       |
+| other JSON-RPC error             | `failed`    | `error`               |
 | worker exits before responding   | `failed`    | `exited`              |
 
 `end_turn` means only that execution finished; whether the result is good
@@ -194,6 +200,46 @@ command, effective grant, the level of every setting, checks, protected
 paths with their digests. Credentials appear as references. When the worker starts, its name and version from ACP
 `initialize` are recorded.
 
+## Harness home
+
+Each Profile owns a harness home: a directory the host creates and passes
+to the worker through the harness's relocation variable (`CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `XDG_*_HOME`, …). It is granted read-write to every run of the
+profile and holds what the harness keeps there: its login, settings and
+transcripts. The harness coordinates concurrent use of its own home. The
+user's own harness configuration (for example `~/.claude`) is reachable only
+if a profile grants it explicitly.
+
+Settings are passed per run where the worker offers a channel: ACP
+`session/new` (system prompt, MCP servers), `session/set_mode`,
+`session/set_config_option`, or the environment. A setting with no per-run
+channel is written into the home before the worker starts, and its digest is
+recorded in `run.admitted`.
+
+Harness configuration found in the workspace (`.claude/`, `.codex/`,
+`.gemini/`, `opencode.json`, …) is not loaded unless the profile opts in per
+source. `run.admitted` records the sources the worker was configured to
+load. This is a worker setting, so its level is at most `supported`.
+
+## Auth
+
+Authentication belongs to the worker. A profile declares one mode:
+
+- `native`: the worker authenticates from its own credential store. The
+  store is the profile's harness home unless the profile names another
+  (such as the user's own); the grant exposes it read-write as a directory,
+  since harnesses replace credential files by rename and take lock files
+  beside them. kagu never opens it. `kagu auth <profile>` runs the login
+  method the worker advertises in ACP `initialize`, with the profile's home
+  and grant, attached to the user's terminal.
+- `reference`: a credential the worker reads from its environment (an API
+  key) is named by reference, resolved when the worker starts, and injected
+  (invariant 13).
+
+kagu does not implement login, refresh or token handling, and does not hide
+or disable a method the worker advertises. A worker that reports
+authentication required ends the run `failed`, reason `auth_required`.
+
 ## Checks
 
 Checks run after the worker ends its turn, under their own grant: workspace
@@ -238,8 +284,8 @@ as gaps.
 
 ## Grant
 
-A Grant is data: filesystem paths (`ro` | `rw`), egress allow-list,
-environment and credential references, resource limits. The host compiles it
+A Grant is data: filesystem paths (`ro` | `rw`), network (`off` | `host` |
+`allow-list`), environment and credential references, resource limits. The host compiles it
 to a substrate.
 
 ### Enforcement levels
@@ -257,17 +303,27 @@ instructions, MCP servers), is reported at one level per run:
 A Profile may mark a setting `required: <level>`. Admission rejects the run
 if the setting's level is lower. Only grant fields can be `enforced`.
 
-| Substrate        | filesystem  | network                                       | credentials                    | process tree |
-| ---------------- | ----------- | --------------------------------------------- | ------------------------------ | ------------ |
-| `none`           | supported, advisory or unsupported | supported, advisory or unsupported | unsupported                    | unsupported  |
-| `bwrap+landlock` | enforced    | enforced: no network at all                   | enforced: env cleared, only granted paths mounted | enforced |
-| `srt`            | enforced    | enforced: allow-listed domains through a host proxy, direct network removed | enforced | enforced |
-| `vm`             | later       |                                               |                                |              |
+| Substrate        | filesystem  | credentials                    | process tree |
+| ---------------- | ----------- | ------------------------------ | ------------ |
+| `none`           | supported, advisory or unsupported | unsupported | unsupported  |
+| `bwrap+landlock` | enforced    | enforced: env cleared, only granted paths mounted | enforced |
+| `srt` (optional, external) | enforced | enforced           | enforced     |
+| `vm`             | later       |                                |              |
 
-A domain allow-list is enforced only while the worker has no route out
-other than the proxy. The host probes the substrate at start (for Landlock,
-its ABI version); a documented gap in the substrate downgrades the affected
-field.
+The network field takes one of three values, independent of filesystem
+confinement:
+
+| Network      | Level                                   |
+| ------------ | --------------------------------------- |
+| `off`        | `enforced` under bwrap+landlock or srt (no network namespace) |
+| `host`       | `unsupported`: the host's network is shared |
+| `allow-list` | `enforced` only through the egress proxy, with direct network removed; otherwise unavailable |
+
+The host probes each substrate at start: bwrap version, Landlock ABI, and
+whether user namespaces can be created. Where they cannot (inside a
+container or an outer sandbox, or under a distribution's namespace
+restriction), the substrate is unavailable and runs that require it are
+`rejected`. A documented gap in a substrate downgrades the affected field.
 
 ACP `session/request_permission` is advisory: the confined program decides
 whether to ask. kagu still answers, from policy first; only unresolved
@@ -292,6 +348,15 @@ every Event with a greater `seq`. Nothing committed after the snapshot is
 missed or sent twice. A reconnecting client passes its cursor as `after`;
 replay is always possible; purged runs appear as gaps.
 
+## Contracts
+
+Rust types are the source. JSON Schema (2020-12) is generated from them and
+committed: one file per Event `type` and `v`, per client method, and one for
+Profiles. CI regenerates the files and fails on any difference. Changing a
+committed versioned file is a breaking change and needs a new `v`.
+
+Profiles are TOML. Unknown keys are refused.
+
 ## Adapter conformance
 
 Each adapter declares the ACP features it supports (resume, cancel,
@@ -300,11 +365,7 @@ against them by a shared suite. A declared setting that passes the suite is
 `supported`; one passed without a test is `advisory`. A run that needs an
 undeclared feature is `rejected`.
 
-## Open questions
+## Formal model
 
-- Profile format: TOML or YAML, and whether its JSON Schema is the source of
-  truth.
-- Workspace allocation: caller-provided path, or a host-created git worktree.
-- A user-facing conversation that groups Tasks across workers, so one
-  thread survives a change of worker. Needed before the first interactive
-  client; not needed for the host.
+The run lifecycle, release, recovery and `log.subscribe` MUST be specified
+in TLA+ and checked with TLC in CI before the host implements them.
