@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "Level": {
+      "description": "How a setting is held (spec: Enforcement levels).",
+      "enum": [
+        "enforced",
+        "supported",
+        "advisory",
+        "unsupported",
+        "unrestricted"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`run.admitted`: the configuration the run is bound to (Invariant 5).",
+  "properties": {
+    "command": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "env": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Environment variable name to credential reference; never a value.",
+      "type": "object"
+    },
+    "levels": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Level"
+      },
+      "type": "object"
+    },
+    "profile": {
+      "description": "The profile, as named in the task.",
+      "type": "string"
+    },
+    "profile_digest": {
+      "description": "SHA-256 of the profile file, hex.",
+      "type": "string"
+    },
+    "substrate": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "profile",
+    "profile_digest",
+    "command",
+    "env",
+    "substrate",
+    "levels"
+  ],
+  "title": "RunAdmitted",
+  "type": "object"
+}

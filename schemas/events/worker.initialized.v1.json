@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`worker.initialized`: what the worker reported in ACP `initialize`.",
+  "properties": {
+    "agent_info": {
+      "description": "ACP `agentInfo`, unmodified."
+    },
+    "protocol_version": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "protocol_version"
+  ],
+  "title": "WorkerInitialized",
+  "type": "object"
+}

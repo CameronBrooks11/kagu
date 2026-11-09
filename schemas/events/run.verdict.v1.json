@@ -1,0 +1,26 @@
+{
+  "$defs": {
+    "Verdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "error",
+        "not_run"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`run.verdict`.",
+  "properties": {
+    "verdict": {
+      "$ref": "#/$defs/Verdict"
+    }
+  },
+  "required": [
+    "verdict"
+  ],
+  "title": "RunVerdict",
+  "type": "object"
+}

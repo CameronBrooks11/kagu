@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "Source": {
+      "enum": [
+        "host",
+        "worker",
+        "client"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A stored event.",
+  "properties": {
+    "data": true,
+    "run": {
+      "type": "string"
+    },
+    "seq": {
+      "description": "Host-wide, strictly increasing, assigned at commit; gaps allowed.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "source": {
+      "$ref": "#/$defs/Source"
+    },
+    "ts": {
+      "description": "RFC 3339 UTC.",
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
+    },
+    "v": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "seq",
+    "run",
+    "ts",
+    "source",
+    "type",
+    "v",
+    "data"
+  ],
+  "title": "Event",
+  "type": "object"
+}

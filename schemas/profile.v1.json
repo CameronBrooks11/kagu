@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "Worker": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "description": "The worker's argv; it must speak ACP v1 on stdio.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variable name to credential reference (`env:NAME`).",
+          "type": "object"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "description": "Profile schema version; must be 1.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "worker": {
+      "$ref": "#/$defs/Worker"
+    }
+  },
+  "required": [
+    "version",
+    "worker"
+  ],
+  "title": "Profile",
+  "type": "object"
+}

@@ -127,7 +127,7 @@ State names follow A2A task states, plus `interrupted`.
 ```mermaid
 stateDiagram-v2
   [*] --> submitted
-  submitted --> rejected: required level unmet / workspace held
+  submitted --> rejected: admission fails
   submitted --> working: worker started
   working --> input_required: permission or elicitation unresolved by policy
   input_required --> working: decision
@@ -139,6 +139,11 @@ stateDiagram-v2
 
 Not drawn: every non-terminal state goes to `canceled` on `run.cancel`, and
 to `interrupted` on host recovery.
+
+Admission fails, and the run is `rejected` with reason `error` and a
+detail, when the profile is invalid, a credential reference is unset, a
+required level is unmet, the workspace is held, or the worker cannot be
+started. A rejected run never reached `working`.
 
 A Run sends one ACP `session/prompt`. A failure before it ends the run
 `failed`: reason `auth_required` for ACP error `-32000` from `initialize` or

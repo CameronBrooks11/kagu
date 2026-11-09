@@ -20,8 +20,13 @@ fmt-check:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
-# CI-equivalent: format check and lint
+# CI-equivalent: format check, lint, committed schemas current
 check: fmt-check lint
+    cargo test -q --test schemas
+
+# Regenerate the committed schemas from the types
+schemas:
+    KAGU_BLESS=1 cargo test -q --test schemas
 
 # Unit tests; sandbox integration tests run in CI and outside sessions
 test:

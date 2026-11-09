@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "Reason": {
+      "description": "Why a run ended `failed` or `rejected`.",
+      "enum": [
+        "auth_required",
+        "error",
+        "exited",
+        "limit",
+        "refusal",
+        "unknown_stop_reason",
+        "unrequested_cancel"
+      ],
+      "type": "string"
+    },
+    "State": {
+      "description": "Run lifecycle states (spec: Run lifecycle).",
+      "enum": [
+        "submitted",
+        "working",
+        "input_required",
+        "checking",
+        "completed",
+        "failed",
+        "canceled",
+        "rejected",
+        "interrupted"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`run.state`: a lifecycle transition.",
+  "properties": {
+    "detail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Reason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "to": {
+      "$ref": "#/$defs/State"
+    }
+  },
+  "required": [
+    "to"
+  ],
+  "title": "RunState",
+  "type": "object"
+}

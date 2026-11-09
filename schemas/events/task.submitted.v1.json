@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`task.submitted`: the intent, as the client gave it.",
+  "properties": {
+    "input": {
+      "type": "string"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "thread": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "profile",
+    "workspace",
+    "input"
+  ],
+  "title": "TaskSubmitted",
+  "type": "object"
+}
