@@ -85,8 +85,9 @@ Rejected: declaring tasks as desired state.
 Grants compile to an OS sandbox, an egress proxy and withheld credentials.
 Every setting is labelled `enforced` (the substrate prevents violation),
 `supported` (the adapter applies it, conformance-tested), `advisory` (passed,
-untested) or `unsupported`, per run; a profile can require a minimum level. A worker's authority is whatever
-its process tree can reach, not what the Grant lists.
+untested) or `unsupported`, per run; a profile can require a minimum
+level. A worker's authority is whatever its process tree can reach, not
+what the Grant lists.
 
 Why: a harness's permission rules are enforced by the process being
 confined. Only the kernel, the proxy and absent credentials hold against a
@@ -131,3 +132,92 @@ patent grant.
 
 Rejected: C++ (more to get right by hand, fewer protocol libraries);
 MPL-2.0 (reciprocity is not a goal for an integration layer).
+
+## 11. Authentication belongs to the worker
+
+A profile's auth is `native` (the worker's own credential store, granted as
+a directory, never opened by kagu) or `reference` (an API key resolved from
+a reference and injected). Sign-in runs the method the worker advertises.
+
+Why: kagu supervises harnesses; it is not a model API client. The official
+harness already implements its login, refresh and the locking between its
+own processes. Reimplementing any of it would duplicate the worker, store
+secrets kagu otherwise never holds, and break when the harness changes.
+
+Rejected: a host-side credential chain or OAuth flow; reading, copying or
+refreshing tokens; hiding or disabling a method the worker supports.
+
+## 12. A harness home per profile
+
+Each profile owns the directory the harness keeps its login, settings and
+transcripts in. The user's own harness configuration is granted only on
+request. Workspace harness configuration is not loaded unless the profile
+opts in.
+
+Why: harnesses keep login and resumable transcripts in one directory, so a
+home per task would mean signing in per task, and a home shared with the
+user exposes their settings, user-level hooks (which run code) and history
+read-write. Workspace configuration can carry hooks too; a repository is
+input, not configuration.
+
+Rejected: a home per task; the user's `~/.claude` (or equivalent) by
+default; loading workspace configuration by default.
+
+## 13. Rust types are the contract source; profiles are TOML
+
+Schemas are generated from the Rust types, committed, and checked for drift
+in CI. A changed versioned schema is a breaking change by rule.
+
+Why: Rust codegen from hand-written JSON Schema is weak (`typify` handles
+tagged enums awkwardly; `schemafy` has had no release since 2021), while
+`schemars` targets 2020-12 directly. Committing the output keeps the
+contract diffable without trusting a schema-diff tool. TOML suits shallow
+profiles and avoids YAML's implicit typing; the maintained Rust YAML crates
+have thinned to one.
+
+Rejected: hand-written JSON Schema driving the types; YAML; JSON (no
+comments).
+
+## 14. The caller provides the workspace
+
+Why: a directory and a lock is the least mechanism. A git worktree needs
+the main repository's `.git` writable, where a worker could plant hooks or
+config that run outside the sandbox later. A host-made clone is safe but is
+mechanism with no caller yet.
+
+Rejected: git worktrees; host-created clones in v1.
+
+## 15. A thread label, not a conversation object
+
+Tasks carry an optional opaque `thread`. A conversation that spans workers
+can be built on it when a client needs one, without migrating data.
+
+Rejected: a conversation noun before any interactive client exists.
+
+## 16. Substrate: bwrap and Landlock, built in
+
+Linux first. The host drives an external `bwrap` (0.12 or later) and the
+`landlock` crate itself; `srt` is an optional external substrate. Network
+is `off`, `host` (reported `unsupported`) or `allow-list` through kagu's
+own egress proxy.
+
+Why: `srt` is pre-1.0, runs on Node and documents fail-open cases, so it
+cannot be the base of an enforcement claim. Without a user namespace there
+is no substrate; that is reported, and runs that need one are rejected,
+rather than falling back silently.
+
+Rejected: `srt` as a required dependency; macOS Seatbelt in v1 (no network
+namespace).
+
+## 17. A TLA+ model of the core
+
+Lifecycle, release, recovery and subscribe are model-checked with TLC in
+CI.
+
+Why: the failure modes worth catching are interleavings (a crash between
+terminal and released, overlapping locks, the snapshot and cursor
+boundary), which unit tests do not enumerate. TLA+ has the longest record
+and TLC needs only a JVM.
+
+Rejected: Quint (smaller project, though it can replay traces against Rust);
+`stateright` (activity slowing); tests alone.
