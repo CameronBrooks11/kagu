@@ -220,3 +220,17 @@ and TLC needs only a JVM.
 
 Rejected: Quint (smaller project, though it can replay traces against Rust);
 `stateright` (activity slowing); tests alone.
+
+## 18. A small ACP client, threads not an async runtime
+
+kagu speaks ACP as newline-delimited JSON-RPC over the worker's stdio with
+its own few-hundred-line client. A run's actor is a thread that receives
+everything from its worker on one channel.
+
+Why: kagu sends `initialize`, `session/new`, `session/prompt` and
+`session/cancel`, answers permission requests, and stores every update
+unparsed (decision 4). That needs `serde_json`, not typed bindings that
+track ACP's v2 draft, and blocking I/O on threads needs no runtime. The SDK
+remains an option if kagu ever needs most of the protocol's types.
+
+Rejected: the `agent-client-protocol` SDK and tokio for slice 1.

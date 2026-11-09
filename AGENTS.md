@@ -17,6 +17,8 @@ reports whether results were verified. `docs/spec.md` is normative;
 
 ```
 src/        host
+tests/      integration tests; support/ holds the stub ACP agent
+schemas/    generated JSON Schemas (never edit by hand)
 docs/       spec, decisions, prior art
 tla/        TLA+ model and TLC config
 ```
@@ -26,8 +28,9 @@ tla/        TLA+ model and TLC config
 ```sh
 just setup   # rustfmt and clippy for the pinned toolchain
 just fmt     # format
-just check   # fmt-check + clippy (CI-equivalent)
-just test    # unit tests
+just check   # fmt-check + clippy + schema drift (CI-equivalent)
+just test    # unit and integration tests
+just schemas # regenerate schemas/ after changing a contract type
 just tla     # model-check tla/ (about 18 minutes)
 ```
 

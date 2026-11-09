@@ -8,3 +8,15 @@ repository = "https://github.com/CameronBrooks11/kagu"
 publish = false
 
 [dependencies]
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+toml = "1.2.1"
+
+# Test fixture: a scripted ACP agent (tests/run.rs).
+[[bin]]
+name = "kagu-stub-agent"
+path = "tests/support/stub_agent.rs"
+test = false

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`worker.session`: the harness's own session id, used to resume.",
+  "properties": {
+    "session_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "WorkerSession",
+  "type": "object"
+}
