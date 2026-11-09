@@ -1,0 +1,24 @@
+{
+  "params": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Params of `run.start`, `run.cancel` and `log.read`.",
+    "properties": {
+      "run": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "run"
+    ],
+    "title": "RunRef",
+    "type": "object"
+  },
+  "result": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Result of methods that return nothing but success.",
+    "title": "Done",
+    "type": "object"
+  }
+}

@@ -72,33 +72,34 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT seq, run, ts, source, type, v, data FROM events WHERE run = ?1 ORDER BY seq",
         )?;
-        let rows = stmt.query_map([run], |r| {
-            let source: String = r.get(3)?;
-            let data: String = r.get(6)?;
-            Ok(Event {
-                seq: r.get(0)?,
-                run: r.get(1)?,
-                ts: r.get(2)?,
-                source: serde_json::from_value(Value::String(source)).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Text,
-                        e.into(),
-                    )
-                })?,
-                kind: r.get(4)?,
-                v: r.get(5)?,
-                data: serde_json::from_str(&data).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        6,
-                        rusqlite::types::Type::Text,
-                        e.into(),
-                    )
-                })?,
-            })
-        })?;
-        rows.collect()
+        stmt.query_map([run], row)?.collect()
     }
+
+    /// Up to `limit` events with `seq` above `after`, in seq order.
+    pub fn after(&self, after: i64, limit: i64) -> rusqlite::Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, run, ts, source, type, v, data FROM events
+             WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+        )?;
+        stmt.query_map(params![after, limit], row)?.collect()
+    }
+}
+
+fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
+    let bad = |i, e: serde_json::Error| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+    };
+    let source: String = r.get(3)?;
+    let data: String = r.get(6)?;
+    Ok(Event {
+        seq: r.get(0)?,
+        run: r.get(1)?,
+        ts: r.get(2)?,
+        source: serde_json::from_value(Value::String(source)).map_err(|e| bad(3, e))?,
+        kind: r.get(4)?,
+        v: r.get(5)?,
+        data: serde_json::from_str(&data).map_err(|e| bad(6, e))?,
+    })
 }
 
 #[cfg(test)]

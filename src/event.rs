@@ -216,33 +216,49 @@ pub struct WorkerExited {
 payload!(WorkerExited, "worker.exited", 1);
 
 /// What a run's events say about it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RunView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<State>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<Reason>,
     pub verdict: Verdict,
 }
 
-/// Derive a run's state from its events, in `seq` order (Invariant 1).
-pub fn fold(events: &[Event]) -> serde_json::Result<RunView> {
-    let mut view = RunView {
-        state: None,
-        reason: None,
-        verdict: Verdict::NotRun,
-    };
-    for e in events {
+impl Default for RunView {
+    fn default() -> Self {
+        Self {
+            state: None,
+            reason: None,
+            verdict: Verdict::NotRun,
+        }
+    }
+}
+
+impl RunView {
+    /// Apply one event of this run (Invariant 1: state is a fold over events).
+    pub fn apply(&mut self, e: &Event) -> serde_json::Result<()> {
         match (e.kind.as_str(), e.v) {
             (RunState::TYPE, RunState::V) => {
                 let s: RunState = serde_json::from_value(e.data.clone())?;
-                view.state = Some(s.to);
-                view.reason = s.reason;
+                self.state = Some(s.to);
+                self.reason = s.reason;
             }
             (RunVerdict::TYPE, RunVerdict::V) => {
                 let v: RunVerdict = serde_json::from_value(e.data.clone())?;
-                view.verdict = v.verdict;
+                self.verdict = v.verdict;
             }
             _ => {}
         }
+        Ok(())
+    }
+}
+
+/// Derive a run's state from its events, in `seq` order.
+pub fn fold(events: &[Event]) -> serde_json::Result<RunView> {
+    let mut view = RunView::default();
+    for e in events {
+        view.apply(e)?;
     }
     Ok(view)
 }

@@ -28,9 +28,14 @@ check: fmt-check lint
 schemas:
     KAGU_BLESS=1 cargo test -q --test schemas
 
-# Unit tests; sandbox integration tests run in CI and outside sessions
+# Tests that run anywhere; the ignored ones need test-integration
 test:
     cargo test
+
+# Tests that need a unix socket or user namespaces, which an agent sandbox
+# may refuse: CI and a local terminal
+test-integration:
+    cargo test --test cli -- --ignored
 
 # Model-check tla/ with TLC (about 18 minutes, mostly liveness)
 tla:

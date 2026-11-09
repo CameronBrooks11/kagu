@@ -29,7 +29,8 @@ tla/        TLA+ model and TLC config
 just setup   # rustfmt and clippy for the pinned toolchain
 just fmt     # format
 just check   # fmt-check + clippy + schema drift (CI-equivalent)
-just test    # unit and integration tests
+just test    # tests that run anywhere (the socket tests are ignored here)
+just test-integration # socket and sandbox tests: CI and a local terminal
 just schemas # regenerate schemas/ after changing a contract type
 just tla     # model-check tla/ (about 18 minutes)
 ```

@@ -1,5 +1,10 @@
 pub mod acp;
+pub mod api;
+pub mod client;
 pub mod event;
+pub mod host;
+pub mod log;
+pub mod paths;
 pub mod profile;
 pub mod run;
 pub mod schema;

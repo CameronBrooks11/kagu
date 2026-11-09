@@ -20,7 +20,7 @@ fn committed_schemas_match_the_types() {
         }
     }
     // A committed schema with no type behind it is drift too.
-    for dir in [root.clone(), root.join("events")] {
+    for dir in [root.clone(), root.join("events"), root.join("api/v1")] {
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
             if path.is_file() && !expected.contains(&path) {

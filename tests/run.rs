@@ -1,16 +1,15 @@
-//! `kagu run` against the stub agent: every row of the stop-reason table and
-//! every failure before the prompt (spec: Run lifecycle).
+//! Runs against the stub agent, driven in-process: every row of the
+//! stop-reason table, every failure before the prompt (spec: Run lifecycle),
+//! redaction, cancel and recovery. The socket and CLI are tested in cli.rs.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use kagu::event::{Event, Reason, State, Verdict, fold};
-use kagu::store::Store;
+use kagu::event::{Event, Reason, State, TaskSubmitted, Verdict, fold};
+use kagu::log::Log;
+use kagu::run::{self, Cancel};
 
 struct Outcome {
-    exit: i32,
-    printed: Vec<Event>,
     stored: Vec<Event>,
 }
 
@@ -39,31 +38,29 @@ fn stub_profile(dir: &Path, mode: &str, extra: &str) -> PathBuf {
     )
 }
 
-fn kagu(dir: &Path, profile: &Path, env: &[(&str, &str)]) -> Outcome {
-    let db = dir.join("kagu.db");
-    let out = Command::new(env!("CARGO_BIN_EXE_kagu"))
-        .args(["run", "--profile"])
-        .arg(profile)
-        .args(["--workspace"])
-        .arg(dir)
-        .args(["--prompt", "do the thing", "--db"])
-        .arg(&db)
-        .envs(env.iter().copied())
-        .output()
-        .unwrap();
-    let printed: Vec<Event> = String::from_utf8(out.stdout)
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    let run = printed.first().map(|e| e.run.clone()).unwrap_or_default();
-    let stored = Store::open(&db).unwrap().events(&run).unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
-    Outcome {
-        exit: out.status.code().unwrap(),
-        printed,
-        stored,
+fn task(dir: &Path, profile: &Path) -> TaskSubmitted {
+    TaskSubmitted {
+        profile: profile.to_str().unwrap().into(),
+        workspace: dir.to_str().unwrap().into(),
+        input: "do the thing".into(),
+        thread: None,
     }
+}
+
+/// Submit and run one task to the end, with `env` as the host's environment.
+fn kagu(dir: &Path, profile: &Path, env: &[(&str, &str)]) -> Outcome {
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let id = run::submit(&log, task(dir, profile)).unwrap();
+    let lookup = |k: &str| {
+        env.iter()
+            .find(|(n, _)| *n == k)
+            .map(|(_, v)| v.to_string())
+    };
+    run::start(&log, &id, &Cancel::default(), &lookup).unwrap();
+    let stored = log.events(&id).unwrap();
+    drop(log);
+    std::fs::remove_dir_all(dir).unwrap();
+    Outcome { stored }
 }
 
 fn run_mode(mode: &str) -> Outcome {
@@ -74,16 +71,13 @@ fn run_mode(mode: &str) -> Outcome {
 
 fn expect(o: &Outcome, state: State, reason: Option<Reason>) {
     let view = fold(&o.stored).unwrap();
-    assert_eq!(view.state, Some(state), "events: {:#?}", o.printed);
+    assert_eq!(view.state, Some(state), "events: {:#?}", o.stored);
     assert_eq!(view.reason, reason);
-    // What was printed is what was stored, and the fold of either agrees.
-    assert_eq!(o.printed, o.stored);
     let seqs: Vec<i64> = o.stored.iter().map(|e| e.seq).collect();
     assert!(
         seqs.windows(2).all(|w| w[0] < w[1]),
         "seq not increasing: {seqs:?}"
     );
-    assert_eq!(o.exit, if state == State::Completed { 0 } else { 1 });
 }
 
 fn kinds(o: &Outcome) -> Vec<&str> {
@@ -335,4 +329,179 @@ fn admission_records_levels_and_digest() {
     assert_eq!(a["levels"]["network"], "unrestricted");
     assert_eq!(a["levels"]["filesystem"], "unsupported");
     assert_eq!(a["profile_digest"].as_str().unwrap().len(), 64);
+}
+
+/// Start a run on its own thread; return once its worker has a session.
+fn start_hanging(
+    dir: &Path,
+    mode: &str,
+) -> (
+    std::sync::Arc<Log>,
+    String,
+    std::sync::Arc<Cancel>,
+    std::thread::JoinHandle<()>,
+) {
+    let p = stub_profile(dir, mode, "");
+    let log = std::sync::Arc::new(Log::open(&dir.join("kagu.db")).unwrap());
+    let id = run::submit(&log, task(dir, &p)).unwrap();
+    let cancel = std::sync::Arc::new(Cancel::default());
+    let handle = {
+        let (log, id, cancel) = (log.clone(), id.clone(), cancel.clone());
+        std::thread::spawn(move || run::start(&log, &id, &cancel, &|_| None).unwrap())
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !log
+        .events(&id)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "worker.update")
+    {
+        assert!(std::time::Instant::now() < deadline, "worker never started");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    (log, id, cancel, handle)
+}
+
+#[test]
+fn cancel_asks_the_worker_to_stop() {
+    let dir = scratch();
+    let (log, id, cancel, handle) = start_hanging(&dir, "hang");
+    cancel.request();
+    handle.join().unwrap();
+    let o = Outcome {
+        stored: log.events(&id).unwrap(),
+    };
+    expect(&o, State::Canceled, None);
+    let exited = o.stored.iter().find(|e| e.kind == "worker.exited").unwrap();
+    assert_eq!(exited.data["code"], 0, "the worker stopped itself");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn cancel_kills_a_worker_that_ignores_it() {
+    let dir = scratch();
+    let (log, id, cancel, handle) = start_hanging(&dir, "hang_hard");
+    let asked = std::time::Instant::now();
+    cancel.request();
+    handle.join().unwrap();
+    // The grace period, then the kill.
+    assert!(asked.elapsed() < run::GRACE * 3, "{:?}", asked.elapsed());
+    let o = Outcome {
+        stored: log.events(&id).unwrap(),
+    };
+    expect(&o, State::Canceled, None);
+    let exited = o.stored.iter().find(|e| e.kind == "worker.exited").unwrap();
+    assert_eq!(exited.data["signal"], 9);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn cancel_before_start_never_spawns() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "end_turn", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let id = run::submit(&log, task(&dir, &p)).unwrap();
+    let cancel = Cancel::default();
+    cancel.request();
+    run::start(&log, &id, &cancel, &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&id).unwrap(),
+    };
+    expect(&o, State::Canceled, None);
+    assert!(!kinds(&o).contains(&"worker.spawned"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn recovery_interrupts_unfinished_runs_only() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "end_turn", "");
+    let db = dir.join("kagu.db");
+    let (done, pending) = {
+        let log = Log::open(&db).unwrap();
+        let done = run::submit(&log, task(&dir, &p)).unwrap();
+        run::start(&log, &done, &Cancel::default(), &|_| None).unwrap();
+        (done, run::submit(&log, task(&dir, &p)).unwrap())
+    };
+    // A host starting on this log.
+    let log = Log::open(&db).unwrap();
+    kagu::host::recover(&log).unwrap();
+    let view = |id: &str| fold(&log.events(id).unwrap()).unwrap().state;
+    assert_eq!(view(&done), Some(State::Completed));
+    assert_eq!(view(&pending), Some(State::Interrupted));
+    let last = log.events(&pending).unwrap().pop().unwrap();
+    assert_eq!(last.source, kagu::event::Source::Host);
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_second_host_on_a_live_log_is_refused_before_it_writes() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "end_turn", "");
+    let db = dir.join("kagu.db");
+    // The first host: holds the lock, with a run it has not finished.
+    let _lock = kagu::host::lock_db(&db).unwrap();
+    let log = Log::open(&db).unwrap();
+    let id = run::submit(&log, task(&dir, &p)).unwrap();
+    let before = log.events(&id).unwrap();
+    let second = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .arg("serve")
+        .arg("--db")
+        .arg(&db)
+        .arg("--socket")
+        .arg(dir.join("second.sock"))
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(stderr.contains("another kagu host"), "{stderr}");
+    assert_eq!(log.events(&id).unwrap(), before, "the second host wrote");
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_existing_socket_directory_is_never_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let serve = |sock: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+            .arg("serve")
+            .arg("--db")
+            .arg(dir.join("kagu.db"))
+            .arg("--socket")
+            .arg(sock)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    // Writable by others: refused, and left as it was.
+    let open = dir.join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let out = serve(&open.join("kagu.sock")).wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not private to this user"));
+    assert_eq!(mode(&open), 0o777);
+    // Private but not 0700: used as it is, never tightened. Where the bind
+    // works the host keeps serving, so stop it once it has bound or exited.
+    let shared = dir.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sock = shared.join("kagu.sock");
+    let mut host = serve(&sock);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !sock.exists() && host.try_wait().unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "host neither bound nor exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = host.kill();
+    let _ = host.wait();
+    assert_eq!(mode(&shared), 0o755);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

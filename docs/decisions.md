@@ -234,3 +234,29 @@ track ACP's v2 draft, and blocking I/O on threads needs no runtime. The SDK
 remains an option if kagu ever needs most of the protocol's types.
 
 Rejected: the `agent-client-protocol` SDK and tokio for slice 1.
+
+## 19. One host per log, over a private unix socket
+
+`kagu serve` takes an exclusive advisory lock on `<db>.lock`, binds a 0600
+socket (in a 0700 directory it creates, or an existing one only if no one
+else can write to it), recovers, and only then serves. Clients use the typed
+client API (`src/api.rs`, schemas under `schemas/api/v1/`).
+
+Why: a second host on the same log would mark the first host's live runs
+`interrupted` and break the single writer per run. The lock is taken before
+the log is read or written, so a refused host has changed nothing. A unix
+socket's file permissions are the whole access control, with no ports or
+tokens.
+
+Rejected: TCP on loopback (any local user can connect); one database per
+host process without a lock (nothing stops a second one).
+
+## 20. Tests split by layer
+
+Run behaviour is tested by driving the library in-process. The socket and
+CLI are tested against a real host, as `#[ignore]`d tests that CI runs
+under `ok` and that `just test-integration` runs locally.
+
+Why: a sandboxed agent session cannot bind a unix socket. Run semantics do
+not depend on the transport, and testing them below it keeps them runnable
+everywhere. The transport is still gated by CI on every change.

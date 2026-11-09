@@ -1,0 +1,33 @@
+{
+  "params": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Params of methods that take none.",
+    "title": "NoParams",
+    "type": "object"
+  },
+  "result": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Result of `host.status`.",
+    "properties": {
+      "active": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "api": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "api",
+      "active"
+    ],
+    "title": "Status",
+    "type": "object"
+  }
+}
