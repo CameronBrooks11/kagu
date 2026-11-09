@@ -414,4 +414,5 @@ undeclared feature is `rejected`.
 ## Formal model
 
 The run lifecycle, release, recovery and `log.subscribe` MUST be specified
-in TLA+ and checked with TLC in CI before the host implements them.
+in TLA+ and checked with TLC in CI before the host implements them. The
+model is `tla/kagu.tla`; `tla/MC.cfg` lists the properties checked.
