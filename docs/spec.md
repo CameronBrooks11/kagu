@@ -100,8 +100,10 @@ and grants it; it does not create, clone or otherwise manage it.
 7. **Fail closed.** A run whose profile requires a level the host or
    adapter cannot provide for a setting is `rejected` at admission.
 8. **One writer per workspace.** At most one non-terminal run holds write
-   access to a path, compared by canonical real path, with an ancestor or
-   descendant counting as the same path. A lock is held from admission
+   access to a workspace, compared by canonical real path, with an ancestor
+   or descendant counting as the same path. A profile's harness home is not
+   a workspace: its runs share it, and the harness coordinates its own use
+   of it. A lock is held from admission
    until the run is terminal **and** its process tree is confirmed gone
    (see [Release](#release)); a terminal run alone does not free it.
 9. **Observed, not invented.** Every worker exit the host observes is an
@@ -137,7 +139,10 @@ stateDiagram-v2
 Not drawn: every non-terminal state goes to `canceled` on `run.cancel`, and
 to `interrupted` on host recovery.
 
-A Run sends one ACP `session/prompt`. Its response ends execution:
+A Run sends one ACP `session/prompt`. A failure before it (`initialize`,
+`session/new`, or the worker failing to start) ends the run `failed`, with
+reason `auth_required` for ACP error `-32000` and `error` otherwise. The
+prompt's response ends execution:
 
 | Response                         | Next state  | Reason recorded       |
 | -------------------------------- | ----------- | --------------------- |
@@ -172,13 +177,17 @@ run with verdict `not_run` executed to the end and was not verified.
 
 **Containment.** The host kills a run's whole process tree on cancel,
 failure or host shutdown, through the substrate's containment (a PID
-namespace under bwrap). Under
-substrate `none` there is no containment: the `process_tree` field is
-`unsupported` and descendants may outlive the host.
+namespace under bwrap). Under substrate `none` there is no containment: the
+`process_tree` field is `unsupported` and descendants may outlive the host.
 
 **Recovery.** On host start, each non-terminal Run gets a `run.interrupted`
 Event with `source: "host"` and moves to `interrupted`. The worker's
-effects up to that point are unknown.
+effects up to that point are unknown. A recorded root still alive (same pid
+and start time) is killed through a pidfd before release is considered.
+
+Workers are spawned with `--die-with-parent` from one thread that lives as
+long as the host, because the parent-death signal follows the spawning
+thread, not the process.
 
 ### Release
 
@@ -195,9 +204,10 @@ appends `run.released` once the whole tree is confirmed gone:
 ## Admission
 
 Admission resolves the Task's profile and hands the result to the new
-Run's actor, which records it as `run.admitted`: profile name and content digest, worker
-command, effective grant, the level of every setting, checks, protected
-paths with their digests. Credentials appear as references. When the worker starts, its name and version from ACP
+Run's actor, which records it as `run.admitted`: profile name and content
+digest, worker command, effective grant, the level of every setting,
+checks, protected paths with their digests. Credentials appear as
+references. When the worker starts, its name and version from ACP
 `initialize` are recorded.
 
 ## Harness home
@@ -205,33 +215,44 @@ paths with their digests. Credentials appear as references. When the worker star
 Each Profile owns a harness home: a directory the host creates and passes
 to the worker through the harness's relocation variable (`CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, `XDG_*_HOME`, …). It is granted read-write to every run of the
-profile and holds what the harness keeps there: its login, settings and
-transcripts. The harness coordinates concurrent use of its own home. The
-user's own harness configuration (for example `~/.claude`) is reachable only
-if a profile grants it explicitly.
+profile and holds the harness's state: its login and transcripts.
 
-Settings are passed per run where the worker offers a channel: ACP
-`session/new` (system prompt, MCP servers), `session/set_mode`,
-`session/set_config_option`, or the environment. A setting with no per-run
-channel is written into the home before the worker starts, and its digest is
-recorded in `run.admitted`.
+The home is state, not configuration. A worker can write it, so whatever
+one run leaves there must not configure the next (invariant 5):
+
+- Configuration is passed per run: ACP `session/new` (system prompt, MCP
+  servers), `session/set_mode`, `session/set_config_option`, the
+  adapter's `_meta` options, or the environment. `run.admitted` records it.
+- The harness's own configuration sources in the home are not loaded (for
+  Claude Code, `settingSources` without `user`). A harness that cannot
+  exclude them gets the files kagu writes bound read-only over them.
+
+The worker's environment: `HOME` and `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`XDG_STATE_HOME` inside the home; `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` and
+`TMPDIR` on a per-run tmpfs.
+
+Using the user's own harness directory (for example `~/.claude`) means
+making it the home: the worker then reaches its settings, hooks and history
+read-write. A profile does this only explicitly.
 
 Harness configuration found in the workspace (`.claude/`, `.codex/`,
 `.gemini/`, `opencode.json`, …) is not loaded unless the profile opts in per
-source. `run.admitted` records the sources the worker was configured to
-load. This is a worker setting, so its level is at most `supported`.
+source. A source covers everything the harness loads from it (for Claude
+Code: settings, hooks, `CLAUDE.md`, `.mcp.json`). `run.admitted` records the
+sources the worker was configured to load. These are worker settings, so
+their level is at most `supported`.
 
 ## Auth
 
 Authentication belongs to the worker. A profile declares one mode:
 
-- `native`: the worker authenticates from its own credential store. The
-  store is the profile's harness home unless the profile names another
-  (such as the user's own); the grant exposes it read-write as a directory,
-  since harnesses replace credential files by rename and take lock files
-  beside them. kagu never opens it. `kagu auth <profile>` runs the login
-  method the worker advertises in ACP `initialize`, with the profile's home
-  and grant, attached to the user's terminal.
+- `native`: the worker authenticates from its own credential store, which
+  is its harness home. The home is granted as a directory because
+  harnesses replace credential files by rename and take lock files beside
+  them. kagu never opens it. `kagu auth <profile>` declares
+  `clientCapabilities.auth.terminal` in ACP `initialize`, then runs a
+  `terminal` login method the worker advertises, with its `args` and `env`,
+  the profile's home and grant, attached to the user's terminal.
 - `reference`: a credential the worker reads from its environment (an API
   key) is named by reference, resolved when the worker starts, and injected
   (invariant 13).
@@ -301,23 +322,36 @@ instructions, MCP servers), is reported at one level per run:
 | `unsupported` | cannot be passed or applied                                             |
 
 A Profile may mark a setting `required: <level>`. Admission rejects the run
-if the setting's level is lower. Only grant fields can be `enforced`.
+if the setting's level is lower. Only grant fields can be `enforced`. A
+setting whose value requests no restriction (network `host`) is recorded as
+`unrestricted` instead of a level, and fails any `required`.
 
 | Substrate        | filesystem  | credentials                    | process tree |
 | ---------------- | ----------- | ------------------------------ | ------------ |
 | `none`           | supported, advisory or unsupported | unsupported | unsupported  |
-| `bwrap+landlock` | enforced    | enforced: env cleared, only granted paths mounted | enforced |
+| `bwrap+landlock` | enforced    | enforced, see below            | enforced     |
 | `srt` (optional, external) | enforced | enforced           | enforced     |
 | `vm`             | later       |                                |              |
 
-The network field takes one of three values, independent of filesystem
-confinement:
+The host starts `bwrap`, which builds the mount, PID and network
+namespaces and runs `kagu sandbox-init` inside them. That helper applies
+Landlock to itself, reports the ABI it got, and execs the worker. Landlock
+comes last because a Landlock-restricted process cannot mount.
 
-| Network      | Level                                   |
-| ------------ | --------------------------------------- |
-| `off`        | `enforced` under bwrap+landlock or srt (no network namespace) |
-| `host`       | `unsupported`: the host's network is shared |
-| `allow-list` | `enforced` only through the egress proxy, with direct network removed; otherwise unavailable |
+The network field takes one of three values:
+
+| Network      | Effect                                                     |
+| ------------ | ---------------------------------------------------------- |
+| `off`        | an empty network namespace; `enforced`                     |
+| `allow-list` | an empty network namespace whose only route is the egress proxy; `enforced` |
+| `host`       | the host's network namespace is shared; a request for no restriction, recorded as `unrestricted` rather than given a level |
+
+Credentials are `enforced` when the environment is cleared, only granted
+paths are mounted, and no unix socket outside the sandbox is reachable.
+With network `host`, abstract unix sockets are shared; they are closed only
+by Landlock scoping (ABI 6 or later), and without it credentials are
+`unsupported`. Services listening on the host's loopback are part of the
+network, so `host` reaches them.
 
 The host probes each substrate at start: bwrap version, Landlock ABI, and
 whether user namespaces can be created. Where they cannot (inside a
@@ -351,9 +385,11 @@ replay is always possible; purged runs appear as gaps.
 ## Contracts
 
 Rust types are the source. JSON Schema (2020-12) is generated from them and
-committed: one file per Event `type` and `v`, per client method, and one for
-Profiles. CI regenerates the files and fails on any difference. Changing a
-committed versioned file is a breaking change and needs a new `v`.
+committed, one file per version: per Event `type` and `v`, per client API
+version (reported by `host.status`), and per Profile `version` (a required
+key). CI regenerates the files and fails on any difference. Adding an
+optional field is compatible; any other change to a committed schema needs
+a new version.
 
 Profiles are TOML. Unknown keys are refused.
 
