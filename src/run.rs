@@ -800,3 +800,35 @@ fn append_state(log: &Log, id: &str, to: State) -> Result<(), String> {
     log.append(id, Source::Host, RunState::TYPE, RunState::V, data)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod turn_tests {
+    use serde_json::json;
+
+    #[test]
+    fn turn_content_is_what_a_turn_streams_and_not_setup_notices() {
+        for kind in [
+            "user_message_chunk",
+            "agent_message_chunk",
+            "agent_thought_chunk",
+            "tool_call",
+            "tool_call_update",
+            "plan",
+        ] {
+            assert!(
+                super::turn_content(&json!({ "sessionUpdate": kind })),
+                "{kind}"
+            );
+        }
+        for kind in [
+            "available_commands_update",
+            "current_mode_update",
+            "session_info_update",
+        ] {
+            assert!(
+                !super::turn_content(&json!({ "sessionUpdate": kind })),
+                "{kind}"
+            );
+        }
+    }
+}

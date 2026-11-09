@@ -79,7 +79,7 @@ and workspace, in its thread, recording which run it `continues`. Its run
 resumes that run's worker session with ACP `session/resume` instead of
 `session/new`, and fails if the worker does not offer resume. A run can be
 continued once, so a chain stays linear and each run resumes exactly the
-history its log shows. A run in which no turn started adds nothing to the
+history its log shows. A run that logged no turn content adds nothing to the
 chain: a continuation resumes the chain's session only if some run in it
 logged turn content (a message, thought, tool call or plan update), and
 otherwise opens a new session. Only a run
