@@ -187,8 +187,9 @@ namespace under bwrap). Under substrate `none` there is no containment: the
 `process_tree` field is `unsupported` and descendants may outlive the host.
 
 **Recovery.** On host start, each non-terminal Run gets a `run.state` Event
-to `interrupted` with `source: "host"`. One host serves a log at a time: it
-holds an exclusive lock on the database before reading or writing it. The worker's
+to `interrupted` with `source: "host"`. One host serves a log at a time:
+`kagu serve` takes an exclusive advisory lock on `<db>.lock` before it
+reads or writes the log, and holds it while serving. The worker's
 effects up to that point are unknown. A recorded root still alive (same pid
 and start time) is killed through a pidfd before release is considered.
 

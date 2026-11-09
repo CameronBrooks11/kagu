@@ -237,8 +237,9 @@ Rejected: the `agent-client-protocol` SDK and tokio for slice 1.
 
 ## 19. One host per log, over a private unix socket
 
-`kagu serve` holds an exclusive lock on the database, binds a 0600 socket
-in a 0700 directory, recovers, and only then serves. Clients use the typed
+`kagu serve` takes an exclusive advisory lock on `<db>.lock`, binds a 0600
+socket (in a 0700 directory it creates, or an existing one only if no one
+else can write to it), recovers, and only then serves. Clients use the typed
 client API (`src/api.rs`, schemas under `schemas/api/v1/`).
 
 Why: a second host on the same log would mark the first host's live runs

@@ -460,3 +460,35 @@ fn a_second_host_on_a_live_log_is_refused_before_it_writes() {
     drop(log);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn an_existing_socket_directory_is_never_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let serve = |sock: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+            .arg("serve")
+            .arg("--db")
+            .arg(dir.join("kagu.db"))
+            .arg("--socket")
+            .arg(sock)
+            .output()
+            .unwrap()
+    };
+    // Writable by others: refused, and left as it was.
+    let open = dir.join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let out = serve(&open.join("kagu.sock"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("writable by group or others"));
+    assert_eq!(mode(&open), 0o777);
+    // Private but not 0700: used as it is, never tightened or loosened.
+    let shared = dir.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = serve(&shared.join("kagu.sock"));
+    assert_eq!(mode(&shared), 0o755);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -113,14 +113,22 @@ pub fn lock_db(db: &Path) -> Result<std::fs::File, String> {
 /// A private socket: its directory is 0700 and the socket 0600.
 fn bind(socket: &Path) -> Result<UnixListener, String> {
     let dir = socket.parent().ok_or("socket path has no directory")?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
-    // `create` leaves an existing directory's mode alone.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    match std::fs::metadata(dir) {
+        // An existing directory is never changed: refuse one that others
+        // could write to, since they could replace the socket.
+        Ok(meta) if meta.permissions().mode() & 0o022 != 0 => {
+            return Err(format!(
+                "{} is writable by group or others; choose a private directory for the socket",
+                dir.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))?,
+    }
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
             return Err(format!(
