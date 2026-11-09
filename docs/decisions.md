@@ -87,8 +87,8 @@ Grants compile to an OS sandbox, an egress proxy and withheld credentials.
 Every setting is labelled `enforced` (the substrate prevents violation),
 `supported` (the adapter applies it, conformance-tested), `advisory` (passed,
 untested) or `unsupported`, per run, or `unrestricted` when the value asks
-for no restriction; a profile can require a minimum level. A worker's authority is whatever its process tree can reach, not
-what the Grant lists.
+for no restriction; a profile can require a minimum level. A worker's
+authority is whatever its process tree can reach, not what the Grant lists.
 
 Why: a harness's permission rules are enforced by the process being
 confined. Only the kernel, the proxy and absent credentials hold against a
