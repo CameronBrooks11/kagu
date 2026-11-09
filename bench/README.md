@@ -49,8 +49,11 @@ everything the model wrote, so capture redacts them:
 
 - **This machine's identifiers,** read when the command runs and never written
   anywhere: the home directory (written as `~`), user, host, and git name and
-  email. Account names too common to identify anyone (`runner`, `root`,
-  `user` and the like) are not treated as identifiers.
+  email. User, host and git name match in any case, with `-` and `_` as word
+  edges. A user or host name that is an ordinary word (`dev`, `test`,
+  `server`, `runner` and the like) is not matched on its own, since that would
+  rewrite text such as `/dev/null`; the home path and git identity still catch
+  it.
 - **Anyone's identifiers:** home paths (Unix, macOS, Windows, and `~` followed
   by a user name), email addresses, IPv4 addresses other than 127.0.0.1 and
   0.0.0.0, IPv6 addresses (two or more groups and a digit, so `a::b` in code
@@ -73,23 +76,27 @@ Then gates check every path under `bench/`:
 
 - **The `bench-check` pre-commit hook** fails on any local identifier or
   pattern above; on an `events.jsonl` whose hash no longer matches; on a trial
-  directory holding anything but its three files; on a symlink, since git
-  commits its target path; on text that is not UTF-8; on a `__pycache__`
-  anywhere; and on any file in `tools/` other than `bench.py` and
-  `test_bench.py`. Those two are scanned for this machine's identifiers, the
-  canary and secrets, but not the other patterns, which their fixtures hold as
-  synthetic examples.
+  directory missing any of its three files or holding anything else; on a
+  symlink, since git commits its target path; on text that is not UTF-8; on a
+  `__pycache__` or nested repository anywhere; and on any file in `tools/`
+  other than `bench.py` and `test_bench.py`. Those two are scanned too, but
+  their fixtures may hold documentation values: `example.org`/`.com`/`.net`
+  and `*.example` emails, the RFC 5737 and 3849 documentation addresses, the
+  RFC 7042 documentation MAC range, and the fictional users alice and bob. Any
+  other identity in them fails, which matters in CI, where the gate cannot
+  know who the contributor is.
 - **`just check` and a `bench` CI job** apply the same rules to every file
   under `bench/` that git could commit: tracked, or untracked and not ignored.
   The CI job also runs gitleaks, pinned to the version the hook uses. In CI
   the local identifiers are the runner's own.
 
 Redaction is pattern-based and catches the common shapes, not every one: a hex
-secret, a short token, an identifier split across lines, or a path encoded as
-base64 passes it. gitleaks, in the hook and in CI, is the backstop for known
-secret formats, and the person committing a trial reads it first. A file the
-gate flags is fixed by re-capturing or by editing the text you wrote, never by
-weakening the gate.
+secret, an AWS secret access key (only key ids have a known shape), a short
+token, an identifier split across lines, or a path encoded as base64 passes
+it. gitleaks, in the hook and in CI, is the backstop for known secret formats,
+and the person committing a trial reads it first. A file the gate flags is
+fixed by re-capturing or by editing the text you wrote, never by weakening the
+gate.
 
 Not recorded: the Landlock ABI (only the levels it produced) and the version of
 Claude Code inside the adapter (only the adapter's own `agent_info`).

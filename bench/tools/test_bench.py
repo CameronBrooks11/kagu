@@ -12,6 +12,7 @@ import secrets
 import shutil
 import stat
 import string
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,9 +72,9 @@ class Redact(unittest.TestCase):
         self.check_clean(r"C:\Users\bob\x", r"C:\Users\<user>\x")
         self.check_clean("~bob/.ssh and ~/notes", "~<user>/.ssh and ~/notes")
         self.check_clean("mail bob@example.org", "mail <email>")
-        self.check_clean("lladdr 0a:1b:2c:3d:4e:5f", "lladdr <mac>")
-        self.check_clean("from 192.168.1.20 to 10.0.0.1", "from <ip> to <ip>")
-        self.check_clean("via fe80::1c2:3ff:fe4d:5e6f and 2001:db8::7", "via <ip> and <ip>")
+        self.check_clean("lladdr 00:00:5e:00:53:01", "lladdr <mac>")
+        self.check_clean("from 192.0.2.20 to 198.51.100.1", "from <ip> to <ip>")
+        self.check_clean("via 2001:db8::1c2:3ff:fe4d:5e6f and 2001:db8::7", "via <ip> and <ip>")
         self.check_clean("/run/user/1000/kagu/kagu.sock", "/run/user/<uid>/kagu/kagu.sock")
 
     def test_encoded_paths(self):
@@ -132,6 +133,16 @@ class Redact(unittest.TestCase):
         ):
             self.check_clean(kept, kept)
 
+    def test_known_shapes_need_a_left_edge(self):
+        for kept in (
+            "risk-assessment-for-production",
+            "task-runner-integration-tests",
+            "ask-before-committing-changes",
+            "xoxo-hugs-and-kisses-from-me",
+            "xoxb-is-not-a-token-here",
+        ):
+            self.check_clean(kept, kept)
+
     def test_identifier_edges(self):
         self.check_clean("alice-cache and /tmp/alice_build", "<user>-cache and /tmp/<user>_build")
         self.check_clean("Alice and ALICE", "<user> and <user>")
@@ -147,7 +158,7 @@ class Redact(unittest.TestCase):
     def test_canary_in_any_form(self):
         hexpart = secrets.token_hex(16)
         local = LOCAL + [("canary", hexpart, "<canary>")]
-        for leaked in (f"KAGU-CANARY-{hexpart}", hexpart, hexpart.upper(), "KAGU-CANARY-abc"):
+        for leaked in (f"KAGU-CANARY-{hexpart}", hexpart, hexpart.upper(), "KAGU-CANARY-" + "abc"):
             out = bench.redact_text(f"read: {leaked}", local)
             self.assertNotIn(leaked.lower(), out.lower())
             self.assertEqual(bench.findings(out, local), [], out)
@@ -167,6 +178,14 @@ class Identifiers(unittest.TestCase):
     def test_generic_account_names_are_not_identifiers(self):
         with mock.patch("getpass.getuser", return_value="runner"), mock.patch(
             "socket.gethostname", return_value="localhost"
+        ):
+            labels = [label for label, _, _ in bench.local_identifiers()]
+        self.assertNotIn("user", labels)
+        self.assertNotIn("host", labels)
+
+    def test_names_that_are_ordinary_words_are_not_identifiers(self):
+        with mock.patch("getpass.getuser", return_value="dev"), mock.patch(
+            "socket.gethostname", return_value="server"
         ):
             labels = [label for label, _, _ in bench.local_identifiers()]
         self.assertNotIn("user", labels)
@@ -206,9 +225,9 @@ class Gate(unittest.TestCase):
             "windows home": r"C:\Users\bob",
             "tilde home": "~bob/x",
             "email": "bob@example.org",
-            "mac": "0a:1b:2c:3d:4e:5f",
-            "ipv4": "10.1.2.3",
-            "ipv6": "fe80::1c2:3ff:fe4d:5e6f",
+            "mac": "00:00:5e:00:53:01",
+            "ipv4": "203.0.113.3",
+            "ipv6": "2001:db8::1c2:3ff:fe4d:5e6f",
             "uid path": "/run/user/1000",
             "token": random_token(43, URLSAFE),
             "canary": "KAGU-CANARY-" + secrets.token_hex(16),
@@ -281,6 +300,23 @@ class Gate(unittest.TestCase):
         tool.write_text(f'KEY = "ghp_{random_token(36)}"\n')
         self.assertEqual(self.gate(), 1)
 
+    def test_the_tools_hold_only_documentation_values(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        tool = tools / "test_bench.py"
+        allowed = 'X = ["/home/alice2/x", "bob@example.org", "192.0.2.1", "2001:db8::1", "00:00:5e:00:53:01", "def test_alice(): pass"]\n'
+        tool.write_text(allowed)
+        self.assertEqual(self.gate(), 0)
+        # Assembled here, so this file holds no identity of its own.
+        for other in ("/home/" + "carol/x", "carol" + "@mail.invalid.io", "203.0.112" + ".9", "fd00:" + ":1:2", "0a:1b" + ":2c:3d:4e:5f", "KAGU-CANARY-" + "abc"):
+            tool.write_text(f'X = "{other}"\n')
+            self.assertEqual(self.gate(), 1, other)
+
+    def test_a_known_shape_in_handwritten_notes_fails(self):
+        notes = self.root / "notes.md"
+        notes.write_text("xoxb-" + random_token(13, string.digits) + "-" + random_token(13, string.digits) + "-" + random_token(24) + "\n")
+        self.assertEqual(self.gate(notes), 1)
+
     def test_bytecode_anywhere_fails(self):
         cache = self.root / "scenarios" / "__pycache__"
         cache.mkdir(parents=True)
@@ -299,6 +335,36 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.gate(safe), 0)
         safe.write_text("ran in /home/bob/work\n")
         self.assertEqual(self.gate(safe), 1)
+
+
+class GitScan(unittest.TestCase):
+    """Without paths, the gate covers what git could commit."""
+
+    def setUp(self):
+        self.root = tempdir(self)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        (self.root / ".gitignore").write_text("ignored.md\n")
+
+    def gate(self):
+        return bench.check([], local=LOCAL, bench=self.root)
+
+    def test_untracked_files_are_scanned_and_ignored_ones_are_not(self):
+        (self.root / "ignored.md").write_text("/home/bob/x\n")
+        self.assertEqual(self.gate(), 0)
+        (self.root / "new.md").write_text("/home/bob/x\n")
+        self.assertEqual(self.gate(), 1)
+
+    def test_a_tracked_file_deleted_from_the_tree_is_not_scanned(self):
+        tracked = self.root / "old.md"
+        tracked.write_text("fine\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "old.md"], check=True)
+        tracked.unlink()
+        self.assertEqual(self.gate(), 0)
+
+    def test_a_nested_repository_fails(self):
+        subprocess.run(["git", "init", "-q", str(self.root / "inner")], check=True)
+        (self.root / "inner" / "x.md").write_text("fine\n")
+        self.assertEqual(self.gate(), 1)
 
 
 class Capture(unittest.TestCase):
@@ -326,7 +392,7 @@ class Capture(unittest.TestCase):
         events = [
             {"seq": 1, "type": "run.admitted", "data": {"substrate": "bwrap", "levels": {"filesystem": "enforced"}, "home": "/home/alice/.local/state/kagu/homes/c-1"}},
             {"seq": 2, "type": "worker.initialized", "data": {"agent_info": {"name": "claude-agent-acp", "version": "0.101.0"}}},
-            {"seq": 3, "type": "worker.update", "data": {"content": {"text": f"alice read KAGU-CANARY-{hexpart} from 10.1.2.3"}}},
+            {"seq": 3, "type": "worker.update", "data": {"content": {"text": f"alice read KAGU-CANARY-{hexpart} from 203.0.113.3"}}},
             {"seq": 4, "type": "worker.update", "data": {"content": {"text": f"the hex alone: {hexpart.upper()}"}}},
             {"seq": 5, "type": "run.state", "data": {"to": "completed"}},
         ]
@@ -338,7 +404,7 @@ class Capture(unittest.TestCase):
         head = json.loads(head)
         self.assertEqual((head["events"], head["canary_seen"]), (5, 2))
         text = "\n".join(lines)
-        for leaked in ("alice", hexpart, "10.1.2.3"):
+        for leaked in ("alice", hexpart, "203.0.113.3"):
             self.assertNotIn(leaked, text.lower())
         self.assertIsNone(bench.header_problem(trial / "events.jsonl"))
         env = json.loads((trial / "env.json").read_text())

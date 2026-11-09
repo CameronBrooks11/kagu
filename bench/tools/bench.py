@@ -11,6 +11,7 @@ Standard library only. See bench/README.md.
 import datetime
 import getpass
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -31,10 +32,23 @@ TRIAL_FILES = {"events.jsonl", "env.json", "trial.md"}
 TOOL_FILES = {"bench.py", "test_bench.py"}
 CANARY = re.compile(r"KAGU-CANARY-[0-9A-Fa-f]+", re.IGNORECASE)
 # Account and host names too common to be identifying, such as a CI runner's.
+# Account and host names that are ordinary words: matching them as names
+# would rewrite text such as /dev/null. A real identity is still caught
+# through the home path and git identity.
 GENERIC_NAMES = {
-    "admin", "codespace", "debian", "fedora", "kagu", "localhost", "root",
-    "runner", "ubuntu", "user", "vscode",
+    "admin", "app", "bench", "box", "build", "builder", "ci", "codespace",
+    "container", "data", "debian", "demo", "desktop", "dev", "docker",
+    "fedora", "git", "guest", "home", "host", "json", "kagu", "laptop",
+    "localhost", "main", "node", "root", "run", "runner", "sandbox", "server",
+    "test", "tests", "ubuntu", "user", "vscode", "web", "work", "workstation",
 }
+# Values reserved for documentation (RFC 2606, 5737, 3849, 7042) and the
+# fictional users alice and bob: the only identifiers the tools' fixtures
+# may hold.
+DOC_NETS = [
+    ipaddress.ip_network(n)
+    for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
+]
 
 # Patterns that identify a person or machine whoever runs this. A placeholder
 # (`<user>`, `~`) never matches them.
@@ -66,12 +80,14 @@ TOKEN = re.compile(r"[A-Za-z0-9_-]{16,}")
 KEEP = re.compile(r"^(?:toolu_|sha(?:256|384|512)-)")
 # Known credential shapes, taken whatever their entropy.
 KNOWN = re.compile(
-    r"xox[abposr]-[A-Za-z0-9-]{10,}"
+    r"(?<![A-Za-z0-9])(?:"
+    r"xox[abeprs]-\d[A-Za-z0-9-]{9,}"
     r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
     r"|gh[pousr]_[A-Za-z0-9]{36,}"
     r"|github_pat_[A-Za-z0-9_]{22,}"
     r"|sk-ant-[A-Za-z0-9_-]{20,}"
     r"|sk-(?:proj-)?[A-Za-z0-9_-]{20,}"
+    r")"
 )
 
 
@@ -185,28 +201,47 @@ def redact(value, local):
     return value
 
 
-def findings(text, local, generic=True):
-    """Why `text` is unsafe to commit; empty when it is safe. Without
-    `generic`, only this machine's identifiers, the canary and secrets count,
-    for the tools, whose fixtures hold synthetic examples of the rest."""
+def documentation(label, value):
+    """Whether a match is a documentation value a fixture may hold."""
+    if label in ("home path", "windows home", "tilde home"):
+        name = re.split(r"[/\\~]", value)[-1].lower()
+        return re.fullmatch(r"(?:alice|bob)\w*", name) is not None
+    if label == "email":
+        domain = value.rsplit("@", 1)[-1].lower()
+        return domain in ("example.org", "example.com", "example.net") or domain.endswith(".example")
+    if label in ("ipv4", "ipv6"):
+        try:
+            address = ipaddress.ip_address(value.split("%")[0])
+        except ValueError:
+            return False
+        return any(address in net for net in DOC_NETS)
+    if label == "mac":
+        return value.lower().startswith("00:00:5e:00:53:")
+    return label == "uid path"
+
+
+def findings(text, local, tools=False):
+    """Why `text` is unsafe to commit; empty when it is safe. In the tools,
+    whose fixtures hold examples, documentation values are allowed and bare
+    user and host names are not matched (source code is full of words)."""
     found = []
     for candidate in dict.fromkeys((text, normalize(text))):
         for label, value, _ in local:
+            if tools and label in ("user", "host"):
+                continue
             if local_pattern(label, value).search(candidate):
                 found.append(f"local {label}")
+        if CANARY.search(candidate):
+            found.append("canary")
         if KNOWN.search(candidate) or any(
             secret_like(m.group()) for m in TOKEN.finditer(candidate)
         ):
             found.append("token")
-        if not generic:
-            continue
-        if CANARY.search(candidate):
-            found.append("canary")
-        for label, pattern, _ in GENERIC:
-            if pattern.search(candidate):
+        matches = [(label, m.group()) for label, pattern, _ in GENERIC for m in pattern.finditer(candidate)]
+        matches += [("ipv6", m.group()) for m in IPV6.finditer(candidate) if ipv6_like(m.group())]
+        for label, value in matches:
+            if not (tools and documentation(label, value)):
                 found.append(label)
-        if any(ipv6_like(m.group()) for m in IPV6.finditer(candidate)):
-            found.append("ipv6")
     return list(dict.fromkeys(found))
 
 
@@ -247,7 +282,7 @@ def problems_of(path, local, bench):
         text = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError:
         return ["not UTF-8 text"]
-    found += findings(text, local, generic=not tools)
+    found += findings(text, local, tools=tools)
     if rel.parts[0] == "trials":
         if len(rel.parts) != 3 or rel.name not in TRIAL_FILES:
             found.append("a trial holds only " + ", ".join(sorted(TRIAL_FILES)))
@@ -261,21 +296,24 @@ def problems_of(path, local, bench):
 def check(paths, local=None, bench=None):
     local = local_identifiers() if local is None else local
     bench = bench or BENCH
-    if paths:
-        targets = [Path(os.path.abspath(p)) for p in paths]
-        # A file in a trial brings in the rest of its trial.
-        for p in list(targets):
-            rel = p.relative_to(bench).parts if bench in p.parents else ()
-            if len(rel) == 3 and rel[0] == "trials":
-                targets += [p.parent / name for name in TRIAL_FILES]
-    else:
-        targets = committable(bench)
+    targets = [Path(os.path.abspath(p)) for p in paths] if paths else committable(bench)
+    # A file in a trial brings in the rest of its trial, which must exist.
+    required = set()
+    for p in list(targets):
+        rel = p.relative_to(bench).parts if bench in p.parents else ()
+        if len(rel) == 3 and rel[0] == "trials":
+            required.update(p.parent / name for name in TRIAL_FILES)
+    targets += sorted(required)
     failed = False
     for path in dict.fromkeys(targets):
         if bench not in path.parents:
             problems = findings(path.read_text(errors="replace"), local) if path.is_file() else []
         elif not (path.exists() or path.is_symlink()):
-            problems = ["missing"]
+            # A trial's file is required; any other path is tracked but
+            # deleted from the work tree, so there is nothing to commit.
+            problems = ["missing"] if path in required else []
+        elif path.is_dir() and not path.is_symlink():
+            problems = ["nested repository or directory entry"]
         else:
             problems = problems_of(path, local, bench)
         for problem in problems:
