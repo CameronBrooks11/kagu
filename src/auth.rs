@@ -24,7 +24,7 @@ pub fn auth(profile_arg: &str, method: Option<&str>) -> Result<i32, String> {
         return Err("the profile has no harness home (worker.home_env)".into());
     }
     let env_var = |k: &str| std::env::var(k).ok();
-    let home = profile::prepare_home(&env_var, &path, worker)?;
+    let home = profile::prepare_home(&env_var, &path, worker, &loaded.profile.grant)?.path;
     let mut env: Vec<(String, String)> = worker
         .home_env
         .iter()
@@ -72,7 +72,7 @@ pub fn auth(profile_arg: &str, method: Option<&str>) -> Result<i32, String> {
                 .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))),
         );
     }
-    let status = substrate::spawnable(probe.as_ref(), &grant, &home, &argv, &env)?
+    let status = substrate::spawnable(probe.as_ref(), &grant, &home, &argv, &env, &[])?
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -90,7 +90,7 @@ fn terminal_methods(
     argv: &[String],
     env: &[(String, String)],
 ) -> Result<Vec<Value>, String> {
-    let child = substrate::spawnable(probe, grant, home, argv, env)?
+    let child = substrate::spawnable(probe, grant, home, argv, env, &[])?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

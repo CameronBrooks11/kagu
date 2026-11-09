@@ -180,6 +180,7 @@ pub fn command(
     workspace: &str,
     argv: &[String],
     env: &[(String, String)],
+    pins: &[(String, String)],
 ) -> Result<Command, String> {
     let exe = std::env::current_exe().map_err(|e| format!("kagu executable: {e}"))?;
     let program = resolve(&argv[0])?;
@@ -226,6 +227,9 @@ pub fn command(
     for p in &grant.ro {
         c.args(["--ro-bind", p, p]);
     }
+    for (source, dest) in pins {
+        c.args(["--ro-bind", source, dest]);
+    }
     c.args(["--dir", HOME, "--chdir", workspace]);
     // The environment is bwrap's own, which it passes on: cleared, then only
     // what the worker should see. Never arguments, which every user can read
@@ -258,9 +262,10 @@ pub fn spawnable(
     workspace: &str,
     argv: &[String],
     env: &[(String, String)],
+    pins: &[(String, String)],
 ) -> Result<Command, String> {
     match probe {
-        Some(Ok(probe)) => command(probe, grant, workspace, argv, env),
+        Some(Ok(probe)) => command(probe, grant, workspace, argv, env, pins),
         Some(Err(e)) => Err(format!("substrate bwrap is unavailable: {e}")),
         None => {
             let mut c = Command::new(&argv[0]);

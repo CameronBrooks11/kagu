@@ -227,7 +227,7 @@ granted read-write to every run of the profile and holds the harness's
 state: its login and transcripts. It lives at
 `$XDG_STATE_HOME/kagu/homes/<name>-<digest>`, mode 0700, where the digest is
 of the profile file's canonical path, so two profile files never share a
-home. The profile names the variables that point at it:
+home. Moving a profile file gives it a new, empty home: sign in again. The profile names the variables that point at it:
 
 ```toml
 [worker]
@@ -250,9 +250,12 @@ one run leaves there must not configure the next (invariant 5):
   adapter's `_meta` options, or the environment. `run.admitted` records it.
 - The harness's own configuration sources in the home are not loaded (for
   Claude Code, `settingSources` without `user`). Where a harness reads one
-  regardless, the profile names it in `home_files`: kagu rewrites it before
-  every run, replacing rather than following a link, and under bwrap mounts
-  it read-only. claude-agent-acp is such a harness: its settings manager
+  regardless, the profile names it in `home_files`. Under bwrap kagu mounts
+  it read-only from an immutable copy in its state
+  (`$XDG_STATE_HOME/kagu/pins/<digest>`) and never replaces the file in the
+  home, which would detach the mount of a run already using it. Without a
+  sandbox it rewrites the file atomically before every run. A link in its
+  place is replaced, never followed. claude-agent-acp is such a harness: its settings manager
   reads `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode`
   and model limits) whatever `settingSources` says.
 - `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` and

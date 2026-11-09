@@ -41,6 +41,13 @@ pub fn home(env: Env, profile: &str) -> Result<PathBuf, String> {
         .join(profile))
 }
 
+/// `$XDG_STATE_HOME/kagu/pins`: pinned home files, by content digest.
+pub fn pins(env: Env) -> Result<PathBuf, String> {
+    Ok(xdg_with(env, "XDG_STATE_HOME", ".local/state")?
+        .join("kagu")
+        .join("pins"))
+}
+
 /// `$XDG_RUNTIME_DIR/kagu/kagu.sock`. There is no fallback: the runtime
 /// directory is the one private, per-boot place for a socket.
 pub fn socket() -> Result<PathBuf, String> {
