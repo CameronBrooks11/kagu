@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -59,4 +59,18 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
 /// The variable an `env:NAME` reference names.
 pub fn reference_var(reference: &str) -> Option<&str> {
     reference.strip_prefix("env:").filter(|v| !v.is_empty())
+}
+
+/// A profile as a task names it: a path (containing `/`), or a name under
+/// `$XDG_CONFIG_HOME/kagu/profiles/` (default `~/.config`).
+pub fn resolve(profile: &str) -> Result<PathBuf, String> {
+    if profile.contains('/') {
+        return Ok(PathBuf::from(profile));
+    }
+    if profile.is_empty() || profile.starts_with('.') {
+        return Err(format!("{profile:?} is not a profile name"));
+    }
+    Ok(crate::paths::config()?
+        .join("profiles")
+        .join(format!("{profile}.toml")))
 }

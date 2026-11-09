@@ -14,8 +14,14 @@ Status: specified and model-checked; implementation starting.
 - [tla/kagu.tla](tla/kagu.tla): TLA+ model of the core
 
 ```sh
+cargo run -- serve                       # the host, in its own terminal
+cargo run -- run --profile <file> --workspace <dir> --prompt <text>
+cargo run -- watch <run>                 # from another terminal
+cargo run -- cancel <run>
+
 just check   # format and lint
-just test    # unit tests
+just test    # tests that run anywhere
+just test-integration                    # socket and sandbox tests
 just tla     # model-check (needs tlc)
 ```
 

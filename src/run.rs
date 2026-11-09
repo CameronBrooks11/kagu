@@ -5,32 +5,51 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use crate::acp::{Conn, Msg};
 use crate::event::*;
+use crate::log::Log;
 use crate::profile;
-use crate::store::Store;
 
 /// ACP error code for "authentication required".
 const AUTH_REQUIRED: i64 = -32000;
-/// How long a worker may take to exit once its stdin closes, and how long
-/// output may trail an exit.
-const GRACE: Duration = Duration::from_secs(2);
+/// How long a worker may take to exit once its stdin closes, how long output
+/// may trail an exit, and how long a cancelled worker has to stop.
+pub const GRACE: Duration = Duration::from_secs(2);
 
-pub struct Options {
-    pub profile: PathBuf,
-    pub workspace: PathBuf,
-    pub input: String,
+/// A request to cancel a run, shared between the host and the run's actor.
+/// The flag decides; the waker only interrupts a wait.
+#[derive(Default)]
+pub struct Cancel {
+    flag: AtomicBool,
+    waker: Mutex<Option<SyncSender<Msg>>>,
+}
+
+impl Cancel {
+    pub fn request(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        if let Some(w) = self.waker.lock().expect("waker lock").as_ref() {
+            let _ = w.try_send(Msg::Cancel);
+        }
+    }
+
+    fn requested(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
 }
 
 enum CallError {
     Rpc { code: i64, message: String },
     Exited,
+    Canceled,
 }
 
 impl CallError {
@@ -38,7 +57,7 @@ impl CallError {
         match self {
             Self::Rpc { code, .. } if *code == AUTH_REQUIRED => (Reason::AuthRequired, None),
             Self::Rpc { code, message } => (Reason::Error, Some(format!("{code}: {message}"))),
-            Self::Exited => (Reason::Exited, None),
+            Self::Exited | Self::Canceled => (Reason::Exited, None),
         }
     }
 }
@@ -47,7 +66,7 @@ impl CallError {
 fn stop(reason: &str) -> (State, Option<Reason>) {
     match reason {
         "end_turn" => (State::Checking, None),
-        // kagu has not asked to cancel, so the worker cancelled on its own.
+        // Reached only when kagu has not asked to cancel.
         "cancelled" => (State::Failed, Some(Reason::UnrequestedCancel)),
         "max_tokens" | "max_turn_requests" => (State::Failed, Some(Reason::Limit)),
         "refusal" => (State::Failed, Some(Reason::Refusal)),
@@ -57,23 +76,25 @@ fn stop(reason: &str) -> (State, Option<Reason>) {
 
 struct Actor<'a> {
     id: String,
-    store: &'a Store,
-    emit: &'a mut dyn FnMut(&Event),
+    log: &'a Log,
+    cancel: &'a Cancel,
     /// Injected credential values and the references that replace them.
     secrets: Vec<(String, String)>,
     view: RunView,
     worker: Option<Conn>,
     exit: Option<ExitStatus>,
+    session: Option<String>,
+    /// Set once a cancel has been sent; the worker must stop by then.
+    cancel_deadline: Option<Instant>,
+    /// Which of the worker's output streams have ended.
+    stdout_closed: bool,
+    stderr_closed: bool,
 }
 
 impl Actor<'_> {
     fn log<P: Payload>(&mut self, source: Source, payload: &P) -> Result<(), String> {
         let data = serde_json::to_value(payload).expect("payload serializes");
-        let event = self
-            .store
-            .append_value(&self.id, source, P::TYPE, P::V, data)
-            .map_err(|e| format!("event log: {e}"))?;
-        (self.emit)(&event);
+        self.log.append(&self.id, source, P::TYPE, P::V, data)?;
         Ok(())
     }
 
@@ -155,6 +176,18 @@ impl Actor<'_> {
         self.raw("stdout", text)
     }
 
+    /// Start cancelling, once: ask the worker to stop and set its deadline.
+    fn begin_cancel(&mut self) {
+        if self.cancel_deadline.is_some() || !self.cancel.requested() {
+            return;
+        }
+        self.cancel_deadline = Some(Instant::now() + GRACE);
+        if let (Some(conn), Some(session)) = (self.worker.as_mut(), self.session.clone()) {
+            // A write to a closed stdin surfaces as Closed or Exited later.
+            let _ = conn.notify("session/cancel", json!({ "sessionId": session }));
+        }
+    }
+
     /// Send a request and handle everything the worker sends until its response.
     fn call(&mut self, method: &str, params: Value) -> Result<Result<Value, CallError>, String> {
         let conn = self.worker.as_mut().expect("worker started");
@@ -162,21 +195,39 @@ impl Actor<'_> {
             return Ok(Err(CallError::Exited));
         };
         // Once the worker has exited, a response may still trail it briefly.
-        let mut deadline: Option<Instant> = self.exit.map(|_| Instant::now() + GRACE);
+        let mut exit_deadline: Option<Instant> = self.exit.map(|_| Instant::now() + GRACE);
         loop {
+            self.begin_cancel();
+            let deadline = match (exit_deadline, self.cancel_deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             let conn = self.worker.as_ref().expect("worker started");
             let msg = match deadline {
                 Some(d) => match conn.recv_until(d) {
                     Some(m) => m,
+                    None if self.cancel_deadline.is_some_and(|c| Instant::now() >= c) => {
+                        conn.kill();
+                        return Ok(Err(CallError::Canceled));
+                    }
                     None => return Ok(Err(CallError::Exited)),
                 },
                 None => conn.recv(),
             };
             match self.clean(msg) {
-                Msg::Closed => return Ok(Err(CallError::Exited)),
+                Msg::Cancel => {}
+                Msg::ErrClosed => self.stderr_closed = true,
+                Msg::Closed => {
+                    self.stdout_closed = true;
+                    return Ok(Err(if self.cancel_deadline.is_some() {
+                        CallError::Canceled
+                    } else {
+                        CallError::Exited
+                    }));
+                }
                 Msg::Exited(status) => {
                     self.exit = Some(status);
-                    deadline = Some(Instant::now() + GRACE);
+                    exit_deadline = Some(Instant::now() + GRACE);
                 }
                 Msg::Raw { stream, text } => self.raw(stream, text)?,
                 Msg::Rpc(msg) => {
@@ -221,9 +272,9 @@ impl Actor<'_> {
         let Some(id) = id.filter(|_| !method.is_empty()) else {
             return Ok(());
         };
-        // A write to a closed stdin surfaces as Closed or Exited on the next receive.
         if method == "session/request_permission" {
-            // No policy and no clients yet: refuse.
+            // Answered at once, so none is pending when a cancel arrives.
+            // No policy yet: refuse.
             let option_id = options
                 .as_array()
                 .and_then(|opts| opts.iter().find(|o| o["kind"] == "reject_once"))
@@ -250,6 +301,9 @@ impl Actor<'_> {
     }
 
     fn fail(&mut self, err: CallError) -> Result<(), String> {
+        if self.cancel_deadline.is_some() {
+            return self.to(State::Canceled, None, None);
+        }
         let (reason, detail) = err.outcome();
         let detail = detail.map(|d| self.redact_str(d));
         self.to(State::Failed, Some(reason), detail)
@@ -260,19 +314,11 @@ impl Actor<'_> {
     }
 
     /// Admission through the end of the prompt.
-    fn drive(&mut self, opts: &Options, workspace: &str) -> Result<(), String> {
-        self.log(
-            Source::Client,
-            &TaskSubmitted {
-                profile: opts.profile.display().to_string(),
-                workspace: workspace.to_string(),
-                input: opts.input.clone(),
-                thread: None,
-            },
-        )?;
-        self.to(State::Submitted, None, None)?;
-
-        let loaded = match profile::load(&opts.profile) {
+    fn drive(&mut self, task: &TaskSubmitted, env_var: Env) -> Result<(), String> {
+        if self.cancel.requested() {
+            return self.to(State::Canceled, None, None);
+        }
+        let loaded = match profile::resolve(&task.profile).and_then(|p| profile::load(&p)) {
             Ok(l) => l,
             Err(e) => return self.reject(e),
         };
@@ -280,7 +326,7 @@ impl Actor<'_> {
         let mut env = Vec::new();
         for (name, reference) in &worker.env {
             let var = profile::reference_var(reference).expect("validated at load");
-            let Ok(value) = std::env::var(var) else {
+            let Some(value) = env_var(var) else {
                 return self.reject(format!("credential reference {reference} is unset"));
             };
             if !value.is_empty() {
@@ -298,7 +344,7 @@ impl Actor<'_> {
         self.log(
             Source::Host,
             &RunAdmitted {
-                profile: opts.profile.display().to_string(),
+                profile: task.profile.clone(),
                 profile_digest: loaded.digest.clone(),
                 command: worker.command.clone(),
                 env: worker.env.clone(),
@@ -309,7 +355,7 @@ impl Actor<'_> {
 
         let spawned = Command::new(&worker.command[0])
             .args(&worker.command[1..])
-            .current_dir(workspace)
+            .current_dir(&task.workspace)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .envs(env)
@@ -323,6 +369,7 @@ impl Actor<'_> {
         };
         let conn = Conn::attach(child);
         let pid = conn.pid();
+        *self.cancel.waker.lock().expect("waker lock") = Some(conn.waker());
         self.worker = Some(conn);
         self.log(Source::Host, &WorkerSpawned { pid })?;
         self.to(State::Working, None, None)?;
@@ -348,7 +395,7 @@ impl Actor<'_> {
             return self.to(State::Failed, Some(Reason::Error), Some(detail));
         }
 
-        let new = json!({"cwd": workspace, "mcpServers": []});
+        let new = json!({"cwd": task.workspace, "mcpServers": []});
         let session = match self.call("session/new", new)? {
             Ok(r) => r
                 .get("sessionId")
@@ -366,10 +413,16 @@ impl Actor<'_> {
                 session_id: self.redact_str(session_id.clone()),
             },
         )?;
+        self.session = Some(session_id.clone());
+        if self.cancel.requested() {
+            return self.to(State::Canceled, None, None);
+        }
 
         let prompt =
-            json!({"sessionId": session_id, "prompt": [{"type": "text", "text": opts.input}]});
+            json!({"sessionId": session_id, "prompt": [{"type": "text", "text": task.input}]});
         match self.call("session/prompt", prompt)? {
+            // A cancel kagu asked for wins over the stop reason that answers it.
+            Ok(_) if self.cancel_deadline.is_some() => self.to(State::Canceled, None, None)?,
             Ok(r) => {
                 let reason = r.get("stopReason").and_then(Value::as_str).unwrap_or("");
                 let (state, why) = stop(reason);
@@ -406,7 +459,9 @@ impl Actor<'_> {
                 Some(Msg::Exited(s)) => self.exit = Some(s),
                 Some(Msg::Raw { stream, text }) => self.raw(stream, text)?,
                 Some(Msg::Rpc(msg)) => self.raw_json(msg)?,
-                Some(Msg::Closed) => {}
+                Some(Msg::Closed) => self.stdout_closed = true,
+                Some(Msg::ErrClosed) => self.stderr_closed = true,
+                Some(Msg::Cancel) => {}
                 None if !killed => {
                     conn.kill();
                     killed = true;
@@ -415,14 +470,19 @@ impl Actor<'_> {
                 None => return Err(format!("worker {} did not exit after kill", conn.pid())),
             }
         }
-        // Output that trails the exit, bounded: a descendant may hold stdout open.
+        // Output that trails the exit, bounded: a descendant may hold a
+        // stream open.
         let deadline = Instant::now() + GRACE;
-        while let Some(msg) = conn.recv_until(deadline).map(|m| self.clean(m)) {
+        while !(self.stdout_closed && self.stderr_closed) {
+            let Some(msg) = conn.recv_until(deadline).map(|m| self.clean(m)) else {
+                break;
+            };
             match msg {
-                Msg::Closed => break,
+                Msg::Closed => self.stdout_closed = true,
+                Msg::ErrClosed => self.stderr_closed = true,
                 Msg::Raw { stream, text } => self.raw(stream, text)?,
                 Msg::Rpc(msg) => self.raw_json(msg)?,
-                Msg::Exited(_) => {}
+                Msg::Exited(_) | Msg::Cancel => {}
             }
         }
         let status = self.exit.expect("exit recorded");
@@ -445,41 +505,87 @@ fn new_run_id() -> String {
     format!("r_{hex}")
 }
 
-/// Run one task to a terminal state, emitting each event as it is appended.
-pub fn run(
-    store: &Store,
-    opts: &Options,
-    emit: &mut dyn FnMut(&Event),
-) -> Result<(String, RunView), String> {
-    let workspace = std::fs::canonicalize(&opts.workspace)
-        .map_err(|e| format!("workspace {}: {e}", opts.workspace.display()))?;
+/// Record a task and its first run, `submitted`. The workspace must be an
+/// absolute path to a directory; the profile a path or a profile name.
+pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
+    let workspace = Path::new(&task.workspace);
+    if !workspace.is_absolute() {
+        return Err(format!("workspace {} is not absolute", workspace.display()));
+    }
+    let workspace = std::fs::canonicalize(workspace)
+        .map_err(|e| format!("workspace {}: {e}", workspace.display()))?;
     if !workspace.is_dir() {
         return Err(format!(
             "workspace {} is not a directory",
             workspace.display()
         ));
     }
-    let workspace = workspace
+    task.workspace = workspace
         .to_str()
         .ok_or("workspace path is not UTF-8")?
         .to_string();
+    let id = new_run_id();
+    let data = serde_json::to_value(&task).expect("task serializes");
+    log.append(
+        &id,
+        Source::Client,
+        TaskSubmitted::TYPE,
+        TaskSubmitted::V,
+        data,
+    )?;
+    append_state(log, &id, State::Submitted)?;
+    Ok(id)
+}
+
+/// Where credential references are resolved: the host's environment.
+pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Drive a submitted run to a terminal state. Runs on the run's own thread.
+pub fn start(log: &Log, id: &str, cancel: &Cancel, env_var: Env) -> Result<(), String> {
+    let events = log.events(id)?;
+    let task: TaskSubmitted = events
+        .iter()
+        .find(|e| e.kind == TaskSubmitted::TYPE)
+        .ok_or_else(|| format!("run {id} has no task"))
+        .and_then(|e| serde_json::from_value(e.data.clone()).map_err(|e| e.to_string()))?;
     let mut actor = Actor {
-        id: new_run_id(),
-        store,
-        emit,
+        id: id.to_string(),
+        log,
+        cancel,
         secrets: Vec::new(),
-        view: RunView {
-            state: None,
-            reason: None,
-            verdict: Verdict::NotRun,
-        },
+        view: fold(&events).map_err(|e| e.to_string())?,
         worker: None,
         exit: None,
+        session: None,
+        cancel_deadline: None,
+        stdout_closed: false,
+        stderr_closed: false,
     };
-    let driven = actor.drive(opts, &workspace);
+    let driven = actor.drive(&task, env_var);
     // The worker is stopped whatever happened, so none outlives its run.
     let stopped = actor.stop_worker();
     driven?;
-    stopped?;
-    Ok((actor.id, actor.view))
+    stopped
+}
+
+/// Record `canceled` for a run that never started, on behalf of its actor.
+pub fn cancel_unstarted(log: &Log, id: &str) -> Result<(), String> {
+    append_state(log, id, State::Canceled)
+}
+
+/// Record `interrupted` for a run the host found unfinished at start: the
+/// host did not observe its end, so nothing else is recorded (Invariant 9).
+pub fn interrupt(log: &Log, id: &str) -> Result<(), String> {
+    append_state(log, id, State::Interrupted)
+}
+
+fn append_state(log: &Log, id: &str, to: State) -> Result<(), String> {
+    let state = RunState {
+        to,
+        reason: None,
+        detail: None,
+    };
+    let data = serde_json::to_value(&state).expect("state serializes");
+    log.append(id, Source::Host, RunState::TYPE, RunState::V, data)?;
+    Ok(())
 }

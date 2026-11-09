@@ -23,8 +23,12 @@ pub enum Msg {
     Raw { stream: &'static str, text: String },
     /// The worker closed stdout.
     Closed,
+    /// The worker closed stderr.
+    ErrClosed,
     /// The worker process exited.
     Exited(ExitStatus),
+    /// The host asks the run to cancel (a wake-up; the run's flag decides).
+    Cancel,
 }
 
 pub struct Conn {
@@ -33,6 +37,7 @@ pub struct Conn {
     next_id: u64,
     child: Arc<Mutex<Child>>,
     pid: u32,
+    waker: SyncSender<Msg>,
 }
 
 /// Read one line, keeping at most `MAX_LINE` bytes. `Some(truncated)`, or
@@ -102,13 +107,17 @@ impl Conn {
         let pid = child.id();
         let child = Arc::new(Mutex::new(child));
 
+        let waker = tx.clone();
         let out_tx = tx.clone();
         thread::spawn(move || {
             forward(stdout, "stdout", &out_tx, true);
             let _ = out_tx.send(Msg::Closed);
         });
         let err_tx = tx.clone();
-        thread::spawn(move || forward(stderr, "stderr", &err_tx, false));
+        thread::spawn(move || {
+            forward(stderr, "stderr", &err_tx, false);
+            let _ = err_tx.send(Msg::ErrClosed);
+        });
         let waited = Arc::clone(&child);
         thread::spawn(move || {
             loop {
@@ -129,7 +138,13 @@ impl Conn {
             next_id: 1,
             child,
             pid,
+            waker,
         }
+    }
+
+    /// A sender that can wake the run's actor from another thread.
+    pub fn waker(&self) -> SyncSender<Msg> {
+        self.waker.clone()
     }
 
     pub fn pid(&self) -> u32 {
@@ -157,6 +172,10 @@ impl Conn {
 
     pub fn respond(&mut self, id: Value, result: Value) -> io::Result<()> {
         self.send(&json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
+
+    pub fn notify(&mut self, method: &str, params: Value) -> io::Result<()> {
+        self.send(&json!({"jsonrpc": "2.0", "method": method, "params": params}))
     }
 
     pub fn respond_error(&mut self, id: Value, code: i64, message: &str) -> io::Result<()> {

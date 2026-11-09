@@ -72,6 +72,9 @@ fn main() {
                     json!({"protocolVersion": 1, "agentInfo": {"name": name, "version": "0"}}),
                 );
             }
+            // `hang` stops when asked; `hang_hard` never does.
+            ("session/cancel", "hang") => reply(&prompt_id, json!({"stopReason": "cancelled"})),
+            ("session/cancel", _) => {}
             ("session/new", "new_auth") => error(&id, -32000, "login"),
             ("session/new", "new_error") => error(&id, -32603, "broken"),
             ("session/new", "no_session") => reply(&id, json!({})),
@@ -116,6 +119,7 @@ fn main() {
                         eprintln!("{{\"pin\": {secret}}}");
                         reply(&id, json!({"stopReason": "end_turn"}));
                     }
+                    "hang" | "hang_hard" => update("working"),
                     "noise" => {
                         println!("not json");
                         reply(&id, json!({"stopReason": "end_turn"}));

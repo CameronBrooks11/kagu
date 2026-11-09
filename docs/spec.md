@@ -392,7 +392,7 @@ Client methods: `task.submit`, `run.start`, `run.cancel`, `request.decide`,
 
 `log.subscribe { after? }` reads a snapshot of non-terminal runs and the
 highest committed `seq` in one read transaction, returns both, then streams
-every Event with a greater `seq`. Nothing committed after the snapshot is
+every Event with a greater `seq` as `log.event` notifications. Nothing committed after the snapshot is
 missed or sent twice. A reconnecting client passes its cursor as `after`;
 replay is always possible; purged runs appear as gaps.
 

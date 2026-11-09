@@ -1,12 +1,20 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kagu::event::State;
-use kagu::run::{Options, run};
-use kagu::store::Store;
+use serde_json::{Value, json};
 
-const USAGE: &str =
-    "usage: kagu run --profile <file> --workspace <dir> --prompt <text> [--db <file>]";
+use kagu::client::Client;
+use kagu::event::{Event, State};
+
+const USAGE: &str = "usage:
+  kagu serve [--db <file>] [--socket <path>]
+  kagu run --profile <name|file> --workspace <dir> --prompt <text> [--thread <id>] [--json]
+  kagu watch [<run>] [--after <seq>] [--json]
+  kagu log <run> [--json]
+  kagu cancel <run>
+  kagu status
+Every client command takes --socket <path> (default $XDG_RUNTIME_DIR/kagu/kagu.sock).";
 
 fn main() -> ExitCode {
     match cli(std::env::args().skip(1).collect()) {
@@ -18,55 +26,277 @@ fn main() -> ExitCode {
     }
 }
 
-fn cli(args: Vec<String>) -> Result<ExitCode, String> {
-    let mut args = args.into_iter();
-    if args.next().as_deref() != Some("run") {
-        return Err(USAGE.into());
-    }
-    let (mut profile, mut workspace, mut prompt, mut db) = (None, None, None, None);
-    while let Some(flag) = args.next() {
-        let value = args.next().ok_or(USAGE)?;
-        match flag.as_str() {
-            "--profile" => profile = Some(PathBuf::from(value)),
-            "--workspace" => workspace = Some(PathBuf::from(value)),
-            "--prompt" => prompt = Some(value),
-            "--db" => db = Some(PathBuf::from(value)),
-            _ => return Err(USAGE.into()),
-        }
-    }
-    let opts = Options {
-        profile: profile.ok_or(USAGE)?,
-        workspace: workspace.ok_or(USAGE)?,
-        input: prompt.ok_or(USAGE)?,
-    };
-    let db = match db {
-        Some(p) => p,
-        None => default_db()?,
-    };
-    let store = Store::open(&db).map_err(|e| format!("{}: {e}", db.display()))?;
-    let (_, view) = run(&store, &opts, &mut |event| {
-        println!(
-            "{}",
-            serde_json::to_string(event).expect("event serializes")
-        );
-    })?;
-    // Exit 0 only for a run that executed to the end; the verdict is in the log.
-    Ok(if view.state == Some(State::Completed) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+struct Args {
+    positional: Vec<String>,
+    flags: BTreeMap<String, String>,
+    json: bool,
 }
 
-/// `$XDG_STATE_HOME/kagu/kagu.db`, defaulting to `~/.local/state`.
-fn default_db() -> Result<PathBuf, String> {
-    let base = match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            PathBuf::from(std::env::var_os("HOME").ok_or("HOME is unset")?).join(".local/state")
+impl Args {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        let mut out = Args {
+            positional: Vec::new(),
+            flags: BTreeMap::new(),
+            json: false,
+        };
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.strip_prefix("--") {
+                Some("json") => out.json = true,
+                Some(flag) => {
+                    let value = args.next().ok_or(USAGE)?;
+                    out.flags.insert(flag.to_string(), value);
+                }
+                None => out.positional.push(arg),
+            }
         }
+        Ok(out)
+    }
+
+    fn flag(&self, name: &str) -> Option<&str> {
+        self.flags.get(name).map(String::as_str)
+    }
+
+    fn required(&self, name: &str) -> Result<&str, String> {
+        self.flag(name)
+            .ok_or_else(|| format!("--{name} is required\n{USAGE}"))
+    }
+
+    fn socket(&self) -> Result<PathBuf, String> {
+        match self.flag("socket") {
+            Some(p) => Ok(PathBuf::from(p)),
+            None => kagu::paths::socket(),
+        }
+    }
+
+    fn connect(&self) -> Result<Client, String> {
+        Client::connect(&self.socket()?)
+    }
+
+    /// Reject flags the command does not take.
+    fn only(&self, allowed: &[&str]) -> Result<(), String> {
+        match self.flags.keys().find(|k| !allowed.contains(&k.as_str())) {
+            Some(k) => Err(format!("unknown flag --{k}\n{USAGE}")),
+            None => Ok(()),
+        }
+    }
+}
+
+fn cli(args: Vec<String>) -> Result<ExitCode, String> {
+    let Some((command, rest)) = args.split_first() else {
+        return Err(USAGE.into());
     };
-    let dir = base.join("kagu");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(dir.join("kagu.db"))
+    let args = Args::parse(rest.to_vec())?;
+    match command.as_str() {
+        "serve" => {
+            args.only(&["db", "socket"])?;
+            let db = match args.flag("db") {
+                Some(p) => PathBuf::from(p),
+                None => {
+                    let dir = kagu::paths::state()?;
+                    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                    dir.join("kagu.db")
+                }
+            };
+            kagu::host::serve(&db, &args.socket()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "run" => {
+            args.only(&["profile", "workspace", "prompt", "thread", "socket"])?;
+            run(&args)
+        }
+        "watch" => {
+            args.only(&["after", "socket"])?;
+            watch(&args)
+        }
+        "log" => {
+            args.only(&["socket"])?;
+            let run = args.positional.first().ok_or(USAGE)?;
+            let mut out = Render::new(args.json);
+            for e in read(&mut args.connect()?, run)? {
+                out.event(&e);
+            }
+            out.end();
+            Ok(ExitCode::SUCCESS)
+        }
+        "cancel" => {
+            args.only(&["socket"])?;
+            let run = args.positional.first().ok_or(USAGE)?;
+            args.connect()?.call("run.cancel", json!({ "run": run }))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "status" => {
+            args.only(&["socket"])?;
+            let status = args.connect()?.call("host.status", json!({}))?;
+            println!("{}", serde_json::to_string_pretty(&status).expect("json"));
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => Err(USAGE.into()),
+    }
+}
+
+/// A profile argument as the host should see it: a name as given, a path
+/// made absolute against this process's directory.
+fn profile_arg(profile: &str) -> Result<String, String> {
+    if !profile.contains('/') && !profile.ends_with(".toml") {
+        return Ok(profile.to_string());
+    }
+    absolute(Path::new(profile))
+}
+
+fn absolute(path: &Path) -> Result<String, String> {
+    let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{} is not UTF-8", path.display()))
+}
+
+fn run(args: &Args) -> Result<ExitCode, String> {
+    let mut task = json!({
+        "profile": profile_arg(args.required("profile")?)?,
+        "workspace": absolute(Path::new(args.required("workspace")?))?,
+        "input": args.required("prompt")?,
+    });
+    if let Some(thread) = args.flag("thread") {
+        task["thread"] = json!(thread);
+    }
+    // Subscribe first, so no event of the new run can be missed.
+    let (snapshot, events) = args.connect()?.subscribe(None)?;
+    let _ = snapshot;
+    let mut control = args.connect()?;
+    let run = control.call("task.submit", task)?["run"]
+        .as_str()
+        .ok_or("host returned no run id")?
+        .to_string();
+    eprintln!("kagu: run {run} (detach with Ctrl-C; `kagu cancel {run}` to stop it)");
+    control.call("run.start", json!({ "run": run }))?;
+    follow(&run, events, Render::new(args.json))
+}
+
+fn read(client: &mut Client, run: &str) -> Result<Vec<Event>, String> {
+    let events = client.call("log.read", json!({ "run": run }))?;
+    serde_json::from_value(events["events"].clone()).map_err(|e| e.to_string())
+}
+
+fn watch(args: &Args) -> Result<ExitCode, String> {
+    let after = match args.flag("after") {
+        Some(s) => Some(s.parse::<i64>().map_err(|e| format!("--after: {e}"))?),
+        None => None,
+    };
+    let mut out = Render::new(args.json);
+    let Some(run) = args.positional.first() else {
+        let (_, events) = args.connect()?.subscribe(after)?;
+        for e in events {
+            out.event(&e?);
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    // History first, then everything after it: no gap, no repeat.
+    let history = match after {
+        Some(_) => Vec::new(),
+        None => read(&mut args.connect()?, run)?,
+    };
+    let from = history.last().map(|e| e.seq).or(after).unwrap_or(0);
+    let (_, events) = args.connect()?.subscribe(Some(from))?;
+    let history = history.into_iter().map(Ok);
+    follow(run, history.chain(events), out)
+}
+
+/// Print a run's events until it has ended and its worker is gone.
+fn follow(
+    run: &str,
+    events: impl Iterator<Item = Result<Event, String>>,
+    mut out: Render,
+) -> Result<ExitCode, String> {
+    let (mut state, mut spawned, mut exited) = (None, false, false);
+    for e in events {
+        let e = e?;
+        if e.run != run {
+            continue;
+        }
+        out.event(&e);
+        match e.kind.as_str() {
+            "run.state" => state = serde_json::from_value::<State>(e.data["to"].clone()).ok(),
+            "worker.spawned" => spawned = true,
+            "worker.exited" => exited = true,
+            _ => {}
+        }
+        if state.is_some_and(State::is_terminal) && (exited || !spawned) {
+            out.end();
+            return Ok(if state == Some(State::Completed) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            });
+        }
+    }
+    out.end();
+    Err("host closed the connection".into())
+}
+
+/// Human-readable output: the agent's text as it streams, one line per tool
+/// call and per lifecycle event. `--json` prints each event instead.
+struct Render {
+    json: bool,
+    mid_line: bool,
+}
+
+impl Render {
+    fn new(json: bool) -> Self {
+        Self {
+            json,
+            mid_line: false,
+        }
+    }
+
+    fn line(&mut self, text: &str) {
+        if self.mid_line {
+            println!();
+            self.mid_line = false;
+        }
+        println!("{text}");
+    }
+
+    fn end(&mut self) {
+        if self.mid_line {
+            println!();
+            self.mid_line = false;
+        }
+    }
+
+    fn event(&mut self, e: &Event) {
+        if self.json {
+            println!("{}", serde_json::to_string(e).expect("event serializes"));
+            return;
+        }
+        let d = &e.data;
+        let text = |v: &Value| v.as_str().unwrap_or("").to_string();
+        match e.kind.as_str() {
+            "worker.update" => match d["sessionUpdate"].as_str() {
+                Some("agent_message_chunk") if d["content"]["type"] == "text" => {
+                    print!("{}", text(&d["content"]["text"]));
+                    self.mid_line = true;
+                }
+                Some("tool_call") => self.line(&format!("→ {}", text(&d["title"]))),
+                _ => {}
+            },
+            "run.state" => {
+                let mut s = format!("· {} {}", e.run, text(&d["to"]));
+                if !d["reason"].is_null() {
+                    s += &format!(" ({})", text(&d["reason"]));
+                }
+                if !d["detail"].is_null() {
+                    s += &format!(": {}", text(&d["detail"]));
+                }
+                self.line(&s);
+            }
+            "run.verdict" => self.line(&format!("· verdict {}", text(&d["verdict"]))),
+            "permission.decided" => {
+                let option = d["option_id"].as_str().unwrap_or("cancelled");
+                self.line(&format!("· permission: {option}"));
+            }
+            "worker.exited" => self.line(&format!("· worker exited {d}")),
+            _ => {}
+        }
+    }
 }
