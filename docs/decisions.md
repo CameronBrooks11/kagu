@@ -86,8 +86,8 @@ Rejected: declaring tasks as desired state.
 Grants compile to an OS sandbox, an egress proxy and withheld credentials.
 Every setting is labelled `enforced` (the substrate prevents violation),
 `supported` (the adapter applies it, conformance-tested), `advisory` (passed,
-untested) or `unsupported`, per run; a profile can require a minimum
-level. A worker's authority is whatever its process tree can reach, not
+untested) or `unsupported`, per run, or `unrestricted` when the value asks
+for no restriction; a profile can require a minimum level. A worker's authority is whatever its process tree can reach, not
 what the Grant lists.
 
 Why: a harness's permission rules are enforced by the process being
@@ -168,7 +168,8 @@ default; loading workspace configuration by default.
 ## 13. Rust types are the contract source; profiles are TOML
 
 Schemas are generated from the Rust types, committed, and checked for drift
-in CI. A changed versioned schema is a breaking change by rule.
+in CI. Adding an optional field is compatible; any other change needs a new
+version.
 
 Why: the types are where the code lives, so generating schemas from them
 keeps one source; committing the output keeps the contract reviewable
