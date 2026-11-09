@@ -1,0 +1,10 @@
+[package]
+name = "kagu"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "A small, headless host that runs agent harnesses as workers."
+repository = "https://github.com/CameronBrooks11/kagu"
+publish = false
+
+[dependencies]
