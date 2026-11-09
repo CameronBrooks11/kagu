@@ -9,7 +9,9 @@ EXTENDS Naturals, Sequences
 CONSTANTS
     Runs,       \* run ids
     Overlap,    \* pairs of runs whose workspaces overlap; symmetric
-    Contained   \* runs whose substrate contains the process tree
+    Contained,  \* runs whose substrate contains the process tree
+    MaxCrashes  \* host crashes in a behaviour; liveness assumes the host
+                \* eventually stays up
 
 NonTerminal == {"submitted", "working", "input_required", "checking"}
 Terminal    == {"completed", "failed", "canceled", "rejected", "interrupted"}
@@ -33,10 +35,11 @@ VARIABLES
     log,         \* durable, insert-only event log
     sub,         \* client subscribed
     cursor,      \* last seq the client processed
-    view         \* run states as the client has folded them
+    view,        \* run states as the client has folded them
+    crashes      \* host crashes so far
 
-vars == <<st, proc, released, attested, up, recovering, log, sub, cursor, view>>
-host == <<st, proc, released, attested, up, recovering, log>>
+vars == <<st, proc, released, attested, up, recovering, log, sub, cursor, view, crashes>>
+host == <<st, proc, released, attested, up, recovering, log, crashes>>
 client == <<sub, cursor, view>>
 
 Ev(r, t, to) == [run |-> r, type |-> t, to |-> to]
@@ -75,6 +78,7 @@ TypeOK ==
     /\ sub \in BOOLEAN
     /\ cursor \in 0..Len(log)
     /\ view \in [Runs -> States]
+    /\ crashes \in 0..MaxCrashes
 
 Init ==
     /\ st = [r \in Runs |-> "none"]
@@ -87,6 +91,7 @@ Init ==
     /\ sub = FALSE
     /\ cursor = 0
     /\ view = [r \in Runs |-> "none"]
+    /\ crashes = 0
 
 ----------------------------------------------------------------------------
 (* Host *)
@@ -94,52 +99,52 @@ Init ==
 Submit(r) ==
     /\ Ready /\ st[r] = "none"
     /\ Move(r, "submitted")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 \* Admission locks the workspace and starts the worker.
 Admit(r) ==
     /\ Ready /\ st[r] = "submitted" /\ ~Conflict(r)
     /\ Move(r, "working")
     /\ proc' = [proc EXCEPT ![r] = "alive"]
-    /\ UNCHANGED <<released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 \* Workspace held, or a required level unmet.
 Reject(r) ==
     /\ Ready /\ st[r] = "submitted"
     /\ Move(r, "rejected")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 Ask(r) ==
     /\ Ready /\ st[r] = "working" /\ proc[r] = "alive" /\ ~Asked(r)
     /\ Move(r, "input_required")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 Decide(r) ==
     /\ Ready /\ st[r] = "input_required" /\ proc[r] = "alive"
     /\ Move(r, "working")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 \* session/prompt returns end_turn.
 EndTurn(r) ==
     /\ Ready /\ st[r] = "working" /\ proc[r] = "alive"
     /\ Move(r, "checking")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 \* Any other stop reason, or a JSON-RPC error.
 StopOther(r) ==
     /\ Ready /\ st[r] = "working" /\ proc[r] = "alive"
     /\ Move(r, "failed")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 Verdict(r) ==
     /\ Ready /\ st[r] = "checking"
     /\ Move(r, "completed")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 Cancel(r) ==
     /\ Ready /\ st[r] \in NonTerminal
     /\ Move(r, "canceled")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 \* The host kills the tree of a run that has ended, and during recovery any
 \* recorded root still alive. Uncontained, only the root is known to die.
@@ -147,7 +152,7 @@ Kill(r) ==
     /\ up /\ proc[r] = "alive"
     /\ st[r] \in Terminal \/ recovering
     /\ proc' = [proc EXCEPT ![r] = IF r \in Contained THEN "gone" ELSE "orphans"]
-    /\ UNCHANGED <<st, released, attested, up, recovering, log>> /\ UNCHANGED client
+    /\ UNCHANGED <<st, released, attested, up, crashes, recovering, log>> /\ UNCHANGED client
 
 \* run.released once the tree is confirmed gone: contained and the root has
 \* exited, or never started.
@@ -157,7 +162,7 @@ Release(r) ==
        \/ r \in Contained /\ proc[r] = "gone"
     /\ released' = [released EXCEPT ![r] = TRUE]
     /\ log' = Append(log, Ev(r, "released", "none"))
-    /\ UNCHANGED <<st, proc, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<st, proc, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 \* workspace.release: a client attests an uncontained tree is gone.
 Attest(r) ==
@@ -166,7 +171,7 @@ Attest(r) ==
     /\ released' = [released EXCEPT ![r] = TRUE]
     /\ attested' = [attested EXCEPT ![r] = TRUE]
     /\ log' = Append(log, Ev(r, "released", "none"))
-    /\ UNCHANGED <<st, proc, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<st, proc, up, crashes, recovering>> /\ UNCHANGED client
 
 ----------------------------------------------------------------------------
 (* Worker and environment: these happen whether or not the host is up; the
@@ -179,18 +184,19 @@ RootExits(r) ==
     /\ IF Ready /\ st[r] \in {"working", "input_required"}
           THEN Move(r, "failed")
           ELSE UNCHANGED <<st, log>>
-    /\ UNCHANGED <<released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 \* Orphaned descendants end. Nobody observes it.
 OrphansEnd(r) ==
     /\ proc[r] = "orphans"
     /\ proc' = [proc EXCEPT ![r] = "gone"]
-    /\ UNCHANGED <<st, released, attested, up, recovering, log>> /\ UNCHANGED client
+    /\ UNCHANGED <<st, released, attested, up, crashes, recovering, log>> /\ UNCHANGED client
 
 \* The host dies. Contained trees die with it (bwrap --die-with-parent ends
 \* the PID namespace). An uncontained root may survive or leave orphans.
 Crash ==
-    /\ up
+    /\ up /\ crashes < MaxCrashes
+    /\ crashes' = crashes + 1
     /\ up' = FALSE
     /\ recovering' = FALSE
     /\ \E survive \in SUBSET {r \in Runs : r \notin Contained /\ proc[r] = "alive"} :
@@ -204,19 +210,19 @@ Restart ==
     /\ ~up
     /\ up' = TRUE
     /\ recovering' = TRUE
-    /\ UNCHANGED <<st, proc, released, attested, log>> /\ UNCHANGED client
+    /\ UNCHANGED <<st, proc, released, attested, log, crashes>> /\ UNCHANGED client
 
 \* Recovery: each non-terminal run's actor records run.interrupted. Nothing
 \* about the worker's end is recorded (invariant 9).
 Interrupt(r) ==
     /\ up /\ recovering /\ st[r] \in NonTerminal
     /\ Move(r, "interrupted")
-    /\ UNCHANGED <<proc, released, attested, up, recovering>> /\ UNCHANGED client
+    /\ UNCHANGED <<proc, released, attested, up, crashes, recovering>> /\ UNCHANGED client
 
 Recovered ==
     /\ up /\ recovering /\ \A r \in Runs : st[r] \notin NonTerminal
     /\ recovering' = FALSE
-    /\ UNCHANGED <<st, proc, released, attested, up, log>> /\ UNCHANGED client
+    /\ UNCHANGED <<st, proc, released, attested, up, crashes, log>> /\ UNCHANGED client
 
 ----------------------------------------------------------------------------
 (* Client. log.subscribe reads a snapshot and its seq in one read
