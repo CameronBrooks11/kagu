@@ -249,7 +249,7 @@ system_prompt = { mode = "append", text = "..." }   # ACP session/new systemProm
 [worker.meta.claudeCode.options]                   # the adapter's _meta, as is
 settingSources = []
 
-[worker.home_files]                                # rewritten before every run
+[worker.home_files]                                # pinned: read-only under bwrap
 "settings.json" = "{}"
 ```
 
@@ -262,9 +262,8 @@ one run leaves there must not configure the next (invariant 5):
 - The harness's own configuration sources in the home are not loaded (for
   Claude Code, `settingSources` without `user`). Where a harness reads one
   regardless, the profile names it in `home_files`. Under bwrap kagu mounts
-  it read-only from an immutable copy in its state
-  (`$XDG_STATE_HOME/kagu/pins/<digest>`) and never replaces the file in the
-  home, which would detach the mount of a run already using it. Without a
+  it read-only from a copy in its state (`$XDG_STATE_HOME/kagu/pins/<digest>`),
+  rewritten before every run, and never replaces the file in the home, which would detach the mount of a run already using it. Without a
   sandbox it rewrites the file atomically before every run. A link in its
   place is replaced, never followed. claude-agent-acp is such a harness: its settings manager
   reads `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode`

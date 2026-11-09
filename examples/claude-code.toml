@@ -24,7 +24,7 @@ home_env = ["CLAUDE_CONFIG_DIR"]
 settingSources = []
 
 # The adapter itself reads the home's settings.json whatever settingSources
-# says, so kagu rewrites it before every run and mounts it read-only.
+# says, so kagu pins it: read-only from kagu's own copy under bwrap.
 [worker.home_files]
 "settings.json" = "{}"
 

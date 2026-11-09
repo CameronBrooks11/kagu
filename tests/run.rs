@@ -961,3 +961,18 @@ fn under_bwrap_a_pinned_file_in_the_home_is_never_replaced() {
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_tampered_pin_source_is_rewritten() {
+    let dir = scratch();
+    let profile = home_profile(&dir, "tampered", "end_turn", "");
+    let state = dir.join("state").to_str().unwrap().to_string();
+    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+    let (worker, grant) = pinned("bwrap");
+    let first = kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    let source = first.pins[0].0.clone();
+    std::fs::write(&source, "planted").unwrap();
+    kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), "{}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

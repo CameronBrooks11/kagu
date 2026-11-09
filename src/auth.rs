@@ -24,7 +24,9 @@ pub fn auth(profile_arg: &str, method: Option<&str>) -> Result<i32, String> {
         return Err("the profile has no harness home (worker.home_env)".into());
     }
     let env_var = |k: &str| std::env::var(k).ok();
-    let home = profile::prepare_home(&env_var, &path, worker, &loaded.profile.grant)?.path;
+    let prepared = profile::prepare_home(&env_var, &path, worker, &loaded.profile.grant)?;
+    // Bound here too: a login process must not replace a run's mount point.
+    let (home, pins) = (prepared.path, prepared.pins);
     let mut env: Vec<(String, String)> = worker
         .home_env
         .iter()
@@ -41,7 +43,7 @@ pub fn auth(profile_arg: &str, method: Option<&str>) -> Result<i32, String> {
     grant.network = Network::Host;
     let probe = (grant.substrate == Substrate::Bwrap).then(substrate::probe);
 
-    let methods = terminal_methods(probe.as_ref(), &grant, &home, &worker.command, &env)?;
+    let methods = terminal_methods(probe.as_ref(), &grant, &home, &worker.command, &env, &pins)?;
     let chosen = match method {
         Some(id) => methods.iter().find(|m| m["id"] == id),
         None => methods.first(),
@@ -72,7 +74,7 @@ pub fn auth(profile_arg: &str, method: Option<&str>) -> Result<i32, String> {
                 .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))),
         );
     }
-    let status = substrate::spawnable(probe.as_ref(), &grant, &home, &argv, &env, &[])?
+    let status = substrate::spawnable(probe.as_ref(), &grant, &home, &argv, &env, &pins)?
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -89,8 +91,9 @@ fn terminal_methods(
     home: &str,
     argv: &[String],
     env: &[(String, String)],
+    pins: &[(String, String)],
 ) -> Result<Vec<Value>, String> {
-    let child = substrate::spawnable(probe, grant, home, argv, env, &[])?
+    let child = substrate::spawnable(probe, grant, home, argv, env, pins)?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
