@@ -79,7 +79,9 @@ and workspace, in its thread, recording which run it `continues`. Its run
 resumes that run's worker session with ACP `session/resume` instead of
 `session/new`, and fails if the worker does not offer resume. A run can be
 continued once, so a chain stays linear and each run resumes exactly the
-history its log shows. Only a run
+history its log shows. A continuation that never reached a worker session
+adds nothing to the chain: continuing it resumes the nearest run before it
+that did. Only a run
 that has ended can be continued.
 
 The workspace is a directory the caller names. kagu locks it (invariant 8)

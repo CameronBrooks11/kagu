@@ -388,24 +388,29 @@ impl Actor<'_> {
         };
         let worker = &loaded.profile.worker;
         // A continuation resumes the earlier run's worker session.
-        let resume = match &task.continues {
-            None => None,
-            Some(prev) => {
-                let session = self
-                    .log
-                    .events(prev)?
-                    .iter()
-                    .rev()
-                    .find(|e| e.kind == WorkerSession::TYPE)
-                    .and_then(|e| e.data["session_id"].as_str().map(str::to_string));
-                match session {
-                    Some(s) => Some(s),
-                    None => {
-                        return self.reject(format!("run {prev} has no worker session to resume"));
-                    }
-                }
+        // A continuation resumes the nearest run back along its chain that
+        // reached a worker session: one that ended before it did is skipped.
+        let mut resume = None;
+        let mut back = task.continues.clone();
+        while let Some(prev) = back {
+            let events = self.log.events(&prev)?;
+            let session = events
+                .iter()
+                .rev()
+                .find(|e| e.kind == WorkerSession::TYPE)
+                .and_then(|e| e.data["session_id"].as_str().map(str::to_string));
+            if session.is_some() {
+                resume = session;
+                break;
             }
-        };
+            back = events
+                .iter()
+                .find(|e| e.kind == TaskSubmitted::TYPE)
+                .and_then(|e| e.data["continues"].as_str().map(str::to_string));
+            if back.is_none() {
+                return self.reject(format!("run {prev} has no worker session to resume"));
+            }
+        }
         let mut env = Vec::new();
         for (name, reference) in &worker.env {
             let var = profile::reference_var(reference).expect("validated at load");

@@ -820,3 +820,26 @@ fn a_run_is_continued_once_and_only_through_continue() {
     drop(log);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_continuation_that_never_started_does_not_end_the_chain() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "resumable", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let a = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &a, &Cancel::default(), &|_| None).unwrap();
+    // B is canceled before it starts, so it never reaches a session.
+    let b = run::continue_run(&log, &a, "lost".into()).unwrap();
+    run::cancel_unstarted(&log, &b).unwrap();
+    // Continuing B resumes A's session.
+    let c = run::continue_run(&log, &b, "next".into()).unwrap();
+    run::start(&log, &c, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&c).unwrap(),
+    };
+    expect(&o, State::Completed, None);
+    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    assert_eq!(update.data["content"]["text"], "resumed s1");
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
