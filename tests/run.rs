@@ -34,7 +34,9 @@ fn stub_profile(dir: &Path, mode: &str, extra: &str) -> PathBuf {
     let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
     profile(
         dir,
-        &format!("version = 1\n[worker]\ncommand = [{stub:?}, {mode:?}]\n{extra}"),
+        &format!(
+            "version = 1\n[grant]\nsubstrate = \"none\"\n[worker]\ncommand = [{stub:?}, {mode:?}]\n{extra}"
+        ),
     )
 }
 
@@ -504,4 +506,27 @@ fn an_existing_socket_directory_is_never_changed() {
     let _ = host.wait();
     assert_eq!(mode(&shared), 0o755);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_read_only_path_over_the_workspace_is_rejected() {
+    let dir = scratch();
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    let parent = dir.parent().unwrap().to_str().unwrap();
+    let p = profile(
+        &dir,
+        &format!(
+            "version = 1\n[grant]\nsubstrate = \"none\"\nro = [{parent:?}]\n[worker]\ncommand = [{stub:?}, \"end_turn\"]\n"
+        ),
+    );
+    let o = kagu(&dir, &p, &[]);
+    expect(&o, State::Rejected, Some(Reason::Error));
+    let last = o
+        .stored
+        .iter()
+        .rev()
+        .find(|e| e.kind == "run.state")
+        .unwrap();
+    let detail = last.data["detail"].as_str().unwrap();
+    assert!(detail.contains("contains the workspace"), "{detail}");
 }

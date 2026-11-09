@@ -86,6 +86,14 @@ fn cli(args: Vec<String>) -> Result<ExitCode, String> {
     let Some((command, rest)) = args.split_first() else {
         return Err(USAGE.into());
     };
+    if command == "sandbox-init" {
+        // Inside the sandbox: on success this process becomes the worker.
+        if let Err(e) = kagu::substrate::sandbox_init(rest) {
+            eprintln!("kagu sandbox-init: {e}");
+            return Ok(ExitCode::from(126));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let args = Args::parse(rest.to_vec())?;
     match command.as_str() {
         "serve" => {

@@ -30,7 +30,9 @@ fn stub_profile(dir: &Path, mode: &str) -> PathBuf {
     let path = dir.join("profile.toml");
     std::fs::write(
         &path,
-        format!("version = 1\n[worker]\ncommand = [{stub:?}, {mode:?}]\n"),
+        format!(
+            "version = 1\n[grant]\nsubstrate = \"none\"\n[worker]\ncommand = [{stub:?}, {mode:?}]\n"
+        ),
     )
     .unwrap();
     path

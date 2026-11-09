@@ -35,7 +35,7 @@ test:
 # Tests that need a unix socket or user namespaces, which an agent sandbox
 # may refuse: CI and a local terminal
 test-integration:
-    cargo test --test cli -- --ignored
+    cargo test --test cli --test sandbox -- --ignored
 
 # Model-check tla/ with TLC (about 18 minutes, mostly liveness)
 tla:

@@ -14,6 +14,44 @@ pub struct Profile {
     /// Profile schema version; must be 1.
     pub version: u32,
     pub worker: Worker,
+    #[serde(default)]
+    pub grant: Grant,
+}
+
+/// What a run's worker may reach (spec: Grant).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Grant {
+    #[serde(default)]
+    pub substrate: Substrate,
+    #[serde(default)]
+    pub network: Network,
+    /// Extra paths the worker may read, such as its own runtime.
+    #[serde(default)]
+    pub ro: Vec<String>,
+    /// Extra paths the worker may write, besides its workspace.
+    #[serde(default)]
+    pub rw: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Substrate {
+    /// bubblewrap namespaces with Landlock applied inside.
+    #[default]
+    Bwrap,
+    /// No confinement: every grant field is `unsupported`.
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    /// The host's network, shared: recorded as `unrestricted`.
+    #[default]
+    Host,
+    /// An empty network namespace.
+    Off,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -41,6 +79,23 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     }
     if profile.worker.command.is_empty() {
         return Err("worker.command is empty".into());
+    }
+    for path in profile.grant.ro.iter().chain(&profile.grant.rw) {
+        if !Path::new(path).is_absolute() {
+            return Err(format!("grant path {path:?} is not absolute"));
+        }
+    }
+    // A read-only path is mounted over the writable ones, so one that
+    // contains a writable path would make it read-only.
+    for ro in &profile.grant.ro {
+        if let Some(rw) = profile
+            .grant
+            .rw
+            .iter()
+            .find(|rw| Path::new(rw).starts_with(ro))
+        {
+            return Err(format!("grant: ro path {ro:?} contains rw path {rw:?}"));
+        }
     }
     for (name, reference) in &profile.worker.env {
         reference_var(reference).ok_or_else(|| {

@@ -197,8 +197,9 @@ Rejected: a conversation noun before any interactive client exists.
 
 ## 16. Substrate: bwrap and Landlock, built in
 
-Linux first. The host drives an external `bwrap` (0.12 or later) and
-applies Landlock itself; `srt` is an optional external substrate.
+Linux first. The host drives an external, non-setuid `bwrap` (0.8 or later,
+the first with every flag kagu uses) and applies Landlock itself; `srt` is
+an optional external substrate. A setuid `bwrap` is refused.
 
 Why: `srt` is pre-1.0, runs on Node and documents fail-open cases, so it
 cannot be the base of an enforcement claim. Without a user namespace there

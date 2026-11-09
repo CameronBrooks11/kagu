@@ -193,9 +193,9 @@ reads or writes the log, and holds it while serving. The worker's
 effects up to that point are unknown. A recorded root still alive (same pid
 and start time) is killed through a pidfd before release is considered.
 
-Workers are spawned with `--die-with-parent` from one thread that lives as
-long as the host, because the parent-death signal follows the spawning
-thread, not the process.
+Workers are spawned with `--die-with-parent` from the run's actor thread,
+which outlives the worker it spawns: the parent-death signal follows the
+spawning thread, not the process.
 
 ### Release
 
@@ -350,8 +350,35 @@ setting whose value requests no restriction (network `host`) is recorded as
 
 The host starts `bwrap`, which builds the mount, PID and network
 namespaces and runs `kagu sandbox-init` inside them. That helper applies
-Landlock to itself, reports the ABI it got, and execs the worker. Landlock
-comes last because a Landlock-restricted process cannot mount.
+Landlock to itself with every right the host's probe found, refuses to run
+the worker if the ruleset is not fully enforced, writes a readiness line to
+stderr, and execs the worker. Landlock comes last because a
+Landlock-restricted process cannot mount. A run reaches `working` only after
+that line; a sandbox that fails to start rejects the run. A worker program
+that starts but cannot run (an interpreter missing from the sandbox, say)
+ends `failed`, reason `exited`, with its stderr in the log. A grant whose
+`ro` path contains the workspace or an `rw` path is rejected, since it would
+make that path read-only. The host probes
+on first use, by running `sandbox-init --probe` inside `bwrap`: one call
+shows both that a user namespace can be created and which Landlock ABI is in
+force. A successful probe is kept; a failed one is retried by the next run.
+
+Inside, the worker sees the system directories read-only, its workspace and
+the grant's `rw` paths read-write, the grant's `ro` paths and its own
+executable read-only (mounted after the writable paths, so a read-only path
+inside a writable one stays read-only), and a fresh tmpfs at `/tmp` holding
+`HOME` and the XDG directories. Its environment is set on `bwrap` itself,
+never passed as arguments, which every user can read in `/proc`.
+
+A profile's grant:
+
+```toml
+[grant]
+substrate = "bwrap"   # default; or "none"
+network = "host"      # default; or "off"
+ro = ["/abs/path"]    # extra read-only paths
+rw = ["/abs/path"]    # extra read-write paths
+```
 
 The network field takes one of three values:
 

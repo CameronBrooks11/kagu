@@ -2,7 +2,6 @@
 //! (Invariant 2). Each state change is appended before it takes effect
 //! (Invariant 1).
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -17,7 +16,8 @@ use serde_json::{Value, json};
 use crate::acp::{Conn, Msg};
 use crate::event::*;
 use crate::log::Log;
-use crate::profile;
+use crate::profile::{self, Substrate};
+use crate::substrate;
 
 /// ACP error code for "authentication required".
 const AUTH_REQUIRED: i64 = -32000;
@@ -72,6 +72,13 @@ fn stop(reason: &str) -> (State, Option<Reason>) {
         "refusal" => (State::Failed, Some(Reason::Refusal)),
         _ => (State::Failed, Some(Reason::UnknownStopReason)),
     }
+}
+
+/// How a sandbox's start ended.
+enum Sandbox {
+    Ready,
+    Failed(String),
+    Canceled,
 }
 
 struct Actor<'a> {
@@ -300,6 +307,50 @@ impl Actor<'_> {
         Ok(())
     }
 
+    /// Wait for `sandbox-init` to report the sandbox built. Until then the
+    /// worker has not started, so a failure here rejects the run.
+    fn await_sandbox(&mut self) -> Result<Sandbox, String> {
+        let deadline = Instant::now() + GRACE * 5;
+        let mut said = Vec::new();
+        loop {
+            if self.cancel.requested() {
+                return Ok(Sandbox::Canceled);
+            }
+            let conn = self.worker.as_ref().expect("worker started");
+            // Matched before redaction, which a short secret could alter.
+            let msg = match conn.recv_until(deadline) {
+                Some(Msg::Raw {
+                    stream: "stderr",
+                    text,
+                }) if text == substrate::READY => return Ok(Sandbox::Ready),
+                other => other.map(|m| self.clean(m)),
+            };
+            match msg {
+                Some(Msg::Raw { stream, text }) => {
+                    said.push(text.clone());
+                    self.raw(stream, text)?;
+                }
+                Some(Msg::Exited(status)) => self.exit = Some(status),
+                Some(Msg::ErrClosed) => self.stderr_closed = true,
+                Some(Msg::Closed) => self.stdout_closed = true,
+                Some(Msg::Rpc(msg)) => self.raw_json(msg)?,
+                Some(Msg::Cancel) => {}
+                None => {
+                    let why = if said.is_empty() {
+                        "no report".to_string()
+                    } else {
+                        said.join("; ")
+                    };
+                    return Ok(Sandbox::Failed(format!("the sandbox did not start: {why}")));
+                }
+            }
+            if self.exit.is_some() && self.stderr_closed {
+                let why = said.join("; ");
+                return Ok(Sandbox::Failed(format!("the sandbox did not start: {why}")));
+            }
+        }
+    }
+
     fn fail(&mut self, err: CallError) -> Result<(), String> {
         if self.cancel_deadline.is_some() {
             return self.to(State::Canceled, None, None);
@@ -334,13 +385,19 @@ impl Actor<'_> {
             }
             env.push((name.clone(), value));
         }
-        // No substrate yet: nothing is confined (spec: Grant).
-        let levels = BTreeMap::from([
-            ("credentials".to_string(), Level::Unsupported),
-            ("filesystem".to_string(), Level::Unsupported),
-            ("network".to_string(), Level::Unrestricted),
-            ("process_tree".to_string(), Level::Unsupported),
-        ]);
+        let grant = &loaded.profile.grant;
+        if let Some(ro) = grant
+            .ro
+            .iter()
+            .find(|ro| Path::new(&task.workspace).starts_with(ro))
+        {
+            return self.reject(format!("grant: ro path {ro:?} contains the workspace"));
+        }
+        let probe = (grant.substrate == Substrate::Bwrap).then(substrate::probe);
+        let levels = match substrate::levels(grant, probe.as_ref()) {
+            Ok(l) => l,
+            Err(e) => return self.reject(e),
+        };
         self.log(
             Source::Host,
             &RunAdmitted {
@@ -348,17 +405,33 @@ impl Actor<'_> {
                 profile_digest: loaded.digest.clone(),
                 command: worker.command.clone(),
                 env: worker.env.clone(),
-                substrate: "none".into(),
+                substrate: serde_json::to_value(grant.substrate)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default(),
                 levels,
+                grant: grant.clone(),
             },
         )?;
 
-        let spawned = Command::new(&worker.command[0])
-            .args(&worker.command[1..])
-            .current_dir(&task.workspace)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .envs(env)
+        let mut command = match &probe {
+            Some(Ok(probe)) => {
+                match substrate::command(probe, grant, &task.workspace, &worker.command, &env) {
+                    Ok(c) => c,
+                    Err(e) => return self.reject(e),
+                }
+            }
+            _ => {
+                let mut c = Command::new(&worker.command[0]);
+                c.args(&worker.command[1..])
+                    .current_dir(&task.workspace)
+                    .env_clear()
+                    .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                    .envs(env);
+                c
+            }
+        };
+        let spawned = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -372,6 +445,13 @@ impl Actor<'_> {
         *self.cancel.waker.lock().expect("waker lock") = Some(conn.waker());
         self.worker = Some(conn);
         self.log(Source::Host, &WorkerSpawned { pid })?;
+        if probe.is_some() {
+            match self.await_sandbox()? {
+                Sandbox::Ready => {}
+                Sandbox::Failed(e) => return self.reject(e),
+                Sandbox::Canceled => return self.to(State::Canceled, None, None),
+            }
+        }
         self.to(State::Working, None, None)?;
 
         let init = json!({"protocolVersion": 1, "clientCapabilities": {}});
