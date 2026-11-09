@@ -20,7 +20,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import urllib.parse
 from pathlib import Path
 
 VERSION = 2
@@ -40,7 +39,7 @@ GENERIC_NAMES = {
 # Patterns that identify a person or machine whoever runs this. A placeholder
 # (`<user>`, `~`) never matches them.
 GENERIC = [
-    ("home path", re.compile(r"/(?:home|Users)/(?!<)[^/\s\"'<>]+"), "/home/<user>"),
+    ("home path", re.compile(r"(?<![\w.-])/(?:home|Users)/(?!<)[^/\s\"'<>]+"), "/home/<user>"),
     (
         "windows home",
         re.compile(r"[A-Za-z]:\\+(?:Users|Documents and Settings)\\+(?!<)[^\\\s\"'<>]+"),
@@ -65,6 +64,15 @@ IPV6 = re.compile(r"(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:]
 TOKEN = re.compile(r"[A-Za-z0-9_-]{16,}")
 # Identifiers a trial needs whose random part would otherwise look secret.
 KEEP = re.compile(r"^(?:toolu_|sha(?:256|384|512)-)")
+# Known credential shapes, taken whatever their entropy.
+KNOWN = re.compile(
+    r"xox[abposr]-[A-Za-z0-9-]{10,}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r"|gh[pousr]_[A-Za-z0-9]{36,}"
+    r"|github_pat_[A-Za-z0-9_]{22,}"
+    r"|sk-ant-[A-Za-z0-9_-]{20,}"
+    r"|sk-(?:proj-)?[A-Za-z0-9_-]{20,}"
+)
 
 
 def entropy(s):
@@ -89,7 +97,13 @@ def secret_like(s):
 
 
 def ipv6_like(s):
-    return ("::" in s or s.count(":") == 7) and s not in ("::", "::1")
+    """An IPv6 address, not `a::b` in code: two or more groups and a digit."""
+    groups = [g for g in s.split(":") if g]
+    return (
+        ("::" in s or s.count(":") == 7)
+        and len(groups) >= 2
+        and any(c.isdigit() for c in s)
+    )
 
 
 def canary_dir():
@@ -129,14 +143,20 @@ def local_identifiers():
 def local_pattern(label, value):
     if label == "home":
         return re.compile(re.escape(value) + r"(?![\w.-])")
-    flags = re.IGNORECASE if label == "canary" else 0
-    return re.compile(r"(?<![\w.-])" + re.escape(value) + r"(?![\w-])", flags)
+    if label == "canary":
+        # Anywhere, any case: a canary glued to other text still leaked.
+        return re.compile(re.escape(value), re.IGNORECASE)
+    # `-` and `_` are edges too: `alice-cache` names alice.
+    return re.compile(
+        r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])", re.IGNORECASE
+    )
 
 
 def normalize(text):
-    """Undo the encodings a path or address can hide behind."""
+    """Decode the slash a path can hide behind (`%2F`, `%252F`, `\\u002f`),
+    and nothing else, so other text is kept as written."""
     text = re.sub(r"\\u002[fF]", "/", text).replace("\\/", "/")
-    return urllib.parse.unquote(text)
+    return re.sub(r"%(?:25)*2[fF]", "/", text)
 
 
 def redact_text(text, local):
@@ -147,6 +167,7 @@ def redact_text(text, local):
     for _, pattern, placeholder in GENERIC:
         text = pattern.sub(placeholder, text)
     text = IPV6.sub(lambda m: "<ip>" if ipv6_like(m.group()) else m.group(), text)
+    text = KNOWN.sub("<token>", text)
     text = TOKEN.sub(lambda m: "<token>" if secret_like(m.group()) else m.group(), text)
     if len(text) > CAP:
         digest = hashlib.sha256(text.encode()).hexdigest()
@@ -164,13 +185,21 @@ def redact(value, local):
     return value
 
 
-def findings(text, local):
-    """Why `text` is unsafe to commit; empty when it is safe."""
+def findings(text, local, generic=True):
+    """Why `text` is unsafe to commit; empty when it is safe. Without
+    `generic`, only this machine's identifiers, the canary and secrets count,
+    for the tools, whose fixtures hold synthetic examples of the rest."""
     found = []
     for candidate in dict.fromkeys((text, normalize(text))):
         for label, value, _ in local:
             if local_pattern(label, value).search(candidate):
                 found.append(f"local {label}")
+        if KNOWN.search(candidate) or any(
+            secret_like(m.group()) for m in TOKEN.finditer(candidate)
+        ):
+            found.append("token")
+        if not generic:
+            continue
         if CANARY.search(candidate):
             found.append("canary")
         for label, pattern, _ in GENERIC:
@@ -178,8 +207,6 @@ def findings(text, local):
                 found.append(label)
         if any(ipv6_like(m.group()) for m in IPV6.finditer(candidate)):
             found.append("ipv6")
-        if any(secret_like(m.group()) for m in TOKEN.finditer(candidate)):
-            found.append("token")
     return list(dict.fromkeys(found))
 
 
@@ -210,16 +237,17 @@ def problems_of(path, local, bench):
     if path.is_symlink():
         return ["symlink (git would commit its target path)"]
     rel = path.relative_to(bench)
-    if rel.parts[0] == "tools":
-        if "__pycache__" in rel.parts:
-            return []
-        return [] if len(rel.parts) == 2 and rel.name in TOOL_FILES else ["unexpected file in tools/"]
+    if "__pycache__" in rel.parts:
+        return ["bytecode cache"]
+    tools = rel.parts[0] == "tools"
+    if tools and not (len(rel.parts) == 2 and rel.name in TOOL_FILES):
+        return ["unexpected file in tools/"]
     found = []
     try:
         text = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError:
         return ["not UTF-8 text"]
-    found += findings(text, local)
+    found += findings(text, local, generic=not tools)
     if rel.parts[0] == "trials":
         if len(rel.parts) != 3 or rel.name not in TRIAL_FILES:
             found.append("a trial holds only " + ", ".join(sorted(TRIAL_FILES)))
@@ -241,11 +269,7 @@ def check(paths, local=None, bench=None):
             if len(rel) == 3 and rel[0] == "trials":
                 targets += [p.parent / name for name in TRIAL_FILES]
     else:
-        targets = []
-        for root, dirs, files in os.walk(bench):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
-            links = [d for d in dirs if (Path(root) / d).is_symlink()]
-            targets += [Path(root) / n for n in files + links]
+        targets = committable(bench)
     failed = False
     for path in dict.fromkeys(targets):
         if bench not in path.parents:
@@ -259,6 +283,22 @@ def check(paths, local=None, bench=None):
             shown = path.relative_to(REPO) if REPO in path.parents else path
             print(f"{shown}: {problem}", file=sys.stderr)
     return 1 if failed else 0
+
+
+def committable(bench):
+    """Every path under `bench` git could commit: tracked, or untracked and not
+    ignored. Outside a git checkout, every path."""
+    out = subprocess.run(
+        ["git", "-C", str(bench), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "."],
+        capture_output=True, text=True, check=False,
+    )
+    if out.returncode == 0:
+        return [bench / p for p in out.stdout.split("\0") if p]
+    targets = []
+    for root, dirs, files in os.walk(bench):
+        links = [d for d in dirs if (Path(root) / d).is_symlink()]
+        targets += [Path(root) / n for n in files + links]
+    return targets
 
 
 def run(argv):
@@ -286,11 +326,13 @@ def build_info(binary):
     except (OSError, TypeError, ValueError):
         built_after = None
     dirty = run(["git", "-C", str(REPO), "status", "--porcelain", "--", ":!bench"])
+    # The client that read the log; the host that ran the run may be
+    # another build, which this cannot see.
     return {
         "kagu_commit": commit,
         "kagu_tree_dirty": bool(dirty),
-        "kagu_binary": binary,
-        "kagu_binary_built_after_commit": built_after,
+        "kagu_client": binary,
+        "kagu_client_built_after_commit": built_after,
     }
 
 
@@ -310,10 +352,12 @@ def criteria(text):
 
 
 def next_trial(trials, today, slug):
-    numbers = [
-        int(p.name[len(today) + 1:][:2])
-        for p in trials.glob(f"{today}-[0-9][0-9]-*")
-    ] if trials.exists() else []
+    numbers = []
+    if trials.exists():
+        for p in trials.glob(f"{today}-*"):
+            number = p.name[len(today) + 1:].split("-", 1)[0]
+            if number.isdigit():
+                numbers.append(int(number))
     return trials / f"{today}-{max(numbers, default=0) + 1:02d}-{slug}"
 
 

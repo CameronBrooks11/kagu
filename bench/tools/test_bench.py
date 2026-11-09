@@ -109,6 +109,37 @@ class Redact(unittest.TestCase):
         ):
             self.check_clean(kept, kept)
 
+    def test_known_credential_shapes(self):
+        for token in (
+            "xoxb-" + random_token(13, string.digits) + "-" + random_token(13, string.digits) + "-" + random_token(24),
+            "AKIA" + random_token(16, string.ascii_uppercase + string.digits),
+            "sk-proj-" + random_token(48, URLSAFE),
+            "github_pat_" + random_token(70, ALNUM + "_"),
+        ):
+            out = bench.redact_text(f"key={token}", LOCAL)
+            self.assertNotIn(token, out)
+            self.assertEqual(bench.findings(out, LOCAL), [], out)
+
+    def test_code_and_text_a_trial_needs_are_kept(self):
+        for kept in (
+            "x[::2]",
+            "use a::b;",
+            "Add::add(x)",
+            "dead::beef",
+            "100%25 done",
+            "a%2Bb%20c",
+            "/srv/files/home/x",
+        ):
+            self.check_clean(kept, kept)
+
+    def test_identifier_edges(self):
+        self.check_clean("alice-cache and /tmp/alice_build", "<user>-cache and /tmp/<user>_build")
+        self.check_clean("Alice and ALICE", "<user> and <user>")
+        hexpart = RNG.getrandbits(128).to_bytes(16, "big").hex()
+        local = LOCAL + [("canary", hexpart, "<canary>")]
+        out = bench.redact_text(f"x{hexpart}_", local)
+        self.assertNotIn(hexpart, out)
+
     def test_most_random_tokens_are_caught(self):
         caught = sum(bench.secret_like(random_token(24)) for _ in range(500))
         self.assertGreater(caught, 450)
@@ -239,6 +270,29 @@ class Gate(unittest.TestCase):
         (tools / "notes.md").write_text("/home/bob/x\n")
         self.assertEqual(self.gate(), 1)
 
+    def test_the_tools_are_scanned_for_identity_and_secrets(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        tool = tools / "test_bench.py"
+        tool.write_text('FIXTURE = "/home/bob/x"\n')
+        self.assertEqual(self.gate(), 0)
+        tool.write_text('HOME = "/home/alice/x"\n')
+        self.assertEqual(self.gate(), 1)
+        tool.write_text(f'KEY = "ghp_{random_token(36)}"\n')
+        self.assertEqual(self.gate(), 1)
+
+    def test_bytecode_anywhere_fails(self):
+        cache = self.root / "scenarios" / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "notes.md").write_text("fine\n")
+        self.assertEqual(self.gate(), 1)
+        self.assertEqual(self.gate(cache / "notes.md"), 1)
+
+    def test_a_symlinked_directory_fails(self):
+        self.write_trial()
+        (self.root / "linked").symlink_to(self.trial, target_is_directory=True)
+        self.assertEqual(self.gate(), 1)
+
     def test_an_unsafe_file_fails_and_a_safe_one_passes(self):
         safe = self.root / "notes.md"
         safe.write_text("ran in ~/work as <user>\n")
@@ -300,6 +354,9 @@ class Capture(unittest.TestCase):
         (trials / "2026-01-01-01-01-demo").mkdir(parents=True)
         (trials / "2026-01-01-03-01-demo").mkdir()
         self.assertEqual(bench.next_trial(trials, "2026-01-01", "01-demo").name, "2026-01-01-04-01-demo")
+        for n in range(5, 101):
+            (trials / f"2026-01-01-{n:02d}-01-demo").mkdir()
+        self.assertEqual(bench.next_trial(trials, "2026-01-01", "01-demo").name, "2026-01-01-101-01-demo")
 
     def test_capture_refuses_without_a_commit(self):
         with mock.patch.object(bench, "run", return_value=""):

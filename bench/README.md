@@ -26,8 +26,9 @@ safe to publish.
      the rest of the file. An edit after capture fails the gate; anyone can
      run the tool, so the hash catches edits, not forgery.
    - `env.json`: the kagu commit, whether the tree outside `bench/` was dirty,
-     which kagu binary ran and whether it was built after that commit, the
-     kernel, bwrap's version, the adapter's `agent_info`, and the run's
+     which kagu client read the log and whether it was built after that commit
+     (the host that ran the run may be another build, which this cannot see),
+     the kernel, bwrap's version, the adapter's `agent_info`, and the run's
      substrate, levels and final state. Nothing is typed by hand. Capture
      refuses to run outside a git checkout.
    - `trial.md`: the scenario's criteria as a checklist.
@@ -52,16 +53,19 @@ everything the model wrote, so capture redacts them:
   `user` and the like) are not treated as identifiers.
 - **Anyone's identifiers:** home paths (Unix, macOS, Windows, and `~` followed
   by a user name), email addresses, IPv4 addresses other than 127.0.0.1 and
-  0.0.0.0, IPv6 addresses other than `::1`, MAC addresses, and
-  `/run/user/<uid>`. Paths hidden by `%2F` or `\u002f` are decoded first.
-- **Secret-like tokens:** runs of 16 or more URL-safe base64 characters that
-  mix upper case, lower case and digits, with entropy near random. On random
-  tokens of 16 to 40 characters this catches about 92 to 98 percent. Hex
-  digests, run ids, UUIDs, tool-call ids (`toolu_`) and SRI digests are kept.
-  Pure hex is never taken, since it cannot be told from a digest.
+  0.0.0.0, IPv6 addresses (two or more groups and a digit, so `a::b` in code
+  is kept) other than `::1`, MAC addresses, and `/run/user/<uid>`. A slash
+  hidden as `%2F`, `%252F` or `\u002f` is decoded first; nothing else is.
+- **Secrets:** known credential shapes (Slack `xox…-`, AWS `AKIA`/`ASIA`,
+  GitHub `gh?_` and `github_pat_`, Anthropic and OpenAI `sk-`) always; and any
+  run of 16 or more URL-safe base64 characters that mixes upper case, lower
+  case and digits with entropy near random, which on random tokens of 16 to 40
+  characters catches about 92 to 98 percent. Hex digests, run ids, UUIDs,
+  tool-call ids (`toolu_`) and SRI digests are kept. Pure hex is never taken,
+  since it cannot be told from a digest.
 - **The canary** that [05-confinement](scenarios/05-confinement.md) plants:
-  its exact value and its bare hex in any case, plus anything shaped like
-  `KAGU-CANARY-…`.
+  its exact value or bare hex in any case, even glued to other text, plus
+  anything shaped like `KAGU-CANARY-…`.
 - **Long strings** over 4096 characters are cut, keeping their length and
   sha256.
 
@@ -70,16 +74,22 @@ Then gates check every path under `bench/`:
 - **The `bench-check` pre-commit hook** fails on any local identifier or
   pattern above; on an `events.jsonl` whose hash no longer matches; on a trial
   directory holding anything but its three files; on a symlink, since git
-  commits its target path; on text that is not UTF-8; and on any file in
-  `tools/` other than `bench.py` and `test_bench.py`.
-- **`just check` and a `bench` CI job** apply the same rules. In CI the local
-  identifiers are the runner's own.
+  commits its target path; on text that is not UTF-8; on a `__pycache__`
+  anywhere; and on any file in `tools/` other than `bench.py` and
+  `test_bench.py`. Those two are scanned for this machine's identifiers, the
+  canary and secrets, but not the other patterns, which their fixtures hold as
+  synthetic examples.
+- **`just check` and a `bench` CI job** apply the same rules to every file
+  under `bench/` that git could commit: tracked, or untracked and not ignored.
+  The CI job also runs gitleaks, pinned to the version the hook uses. In CI
+  the local identifiers are the runner's own.
 
-Redaction is pattern-based and catches the common shapes, not every one:
-a hex secret, a short token, or a path encoded as base64 passes it. gitleaks,
-which runs on every commit, is the backstop for known secret formats, and the
-person committing a trial reads it first. A file the gate flags is fixed by
-re-capturing or by editing the text you wrote, never by weakening the gate.
+Redaction is pattern-based and catches the common shapes, not every one: a hex
+secret, a short token, an identifier split across lines, or a path encoded as
+base64 passes it. gitleaks, in the hook and in CI, is the backstop for known
+secret formats, and the person committing a trial reads it first. A file the
+gate flags is fixed by re-capturing or by editing the text you wrote, never by
+weakening the gate.
 
 Not recorded: the Landlock ABI (only the levels it produced) and the version of
 Claude Code inside the adapter (only the adapter's own `agent_info`).
