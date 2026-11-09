@@ -262,12 +262,17 @@ one run leaves there must not configure the next (invariant 5):
 - The harness's own configuration sources in the home are not loaded (for
   Claude Code, `settingSources` without `user`). Where a harness reads one
   regardless, the profile names it in `home_files`. Under bwrap kagu mounts
-  it read-only from a copy in its state (`$XDG_STATE_HOME/kagu/pins/<digest>`),
-  rewritten before every run, and never replaces the file in the home, which would detach the mount of a run already using it. Without a
-  sandbox it rewrites the file atomically before every run. A link in its
-  place is replaced, never followed. claude-agent-acp is such a harness: its settings manager
-  reads `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode`
-  and model limits) whatever `settingSources` says.
+  it read-only from a copy in its state
+  (`$XDG_STATE_HOME/kagu/pins/<digest>`), rewritten before every run, and
+  never replaces the file in the home, which would detach the mount of a run
+  already using it. Without a sandbox it rewrites the file atomically before
+  every run. A link in its place is replaced, never followed.
+  claude-agent-acp is such a harness: its settings manager reads
+  `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode` and
+  model limits) whatever `settingSources` says.
+- A confined run's workspace and grant paths may not reach kagu's own state
+  (`$XDG_STATE_HOME/kagu`: the event log, every home, the pins), in either
+  direction; kagu grants a run its own home and pins itself.
 - `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` and
   `TMPDIR` are a fresh tmpfs per run, so dotfiles a run writes (`.bashrc`,
   git config) are gone before the next.

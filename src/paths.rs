@@ -33,6 +33,11 @@ pub fn state() -> Result<PathBuf, String> {
     Ok(xdg("XDG_STATE_HOME", ".local/state")?.join("kagu"))
 }
 
+/// `$XDG_STATE_HOME/kagu`, as `env` sees it.
+pub fn state_with(env: Env) -> Result<PathBuf, String> {
+    Ok(xdg_with(env, "XDG_STATE_HOME", ".local/state")?.join("kagu"))
+}
+
 /// `$XDG_STATE_HOME/kagu/homes/<profile>`: a profile's harness home.
 pub fn home(env: Env, profile: &str) -> Result<PathBuf, String> {
     Ok(xdg_with(env, "XDG_STATE_HOME", ".local/state")?

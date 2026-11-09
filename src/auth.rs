@@ -24,6 +24,7 @@ pub fn auth(profile_arg: &str, method: Option<&str>) -> Result<i32, String> {
         return Err("the profile has no harness home (worker.home_env)".into());
     }
     let env_var = |k: &str| std::env::var(k).ok();
+    profile::keep_out_of_state(&env_var, &loaded.profile.grant, None)?;
     let prepared = profile::prepare_home(&env_var, &path, worker, &loaded.profile.grant)?;
     // Bound here too: a login process must not replace a run's mount point.
     let (home, pins) = (prepared.path, prepared.pins);

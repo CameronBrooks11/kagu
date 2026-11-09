@@ -432,6 +432,9 @@ impl Actor<'_> {
         {
             return self.reject(format!("grant: ro path {ro:?} contains the workspace"));
         }
+        if let Err(e) = profile::keep_out_of_state(env_var, &grant, Some(&task.workspace)) {
+            return self.reject(e);
+        }
         // The profile's harness home: its state, granted read-write and named
         // by the variables the harness reads (spec: Harness home).
         let mut pins = Vec::new();
