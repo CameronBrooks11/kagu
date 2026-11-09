@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::api::Snapshot;
-use crate::event::{Event, RunView, Source};
+use crate::event::{Event, Payload, RunView, Source, TaskSubmitted};
 use crate::store::Store;
 
 /// Events read per batch when rebuilding or replaying.
@@ -20,6 +20,8 @@ struct Inner {
     store: Store,
     /// Projection: every run's view. Rebuildable from the log (Invariant 1).
     runs: BTreeMap<String, RunView>,
+    /// Projection: the run that continued each run, so a chain stays linear.
+    continued: BTreeMap<String, String>,
     /// Highest committed seq.
     last: i64,
 }
@@ -35,6 +37,7 @@ impl Log {
         let mut inner = Inner {
             store,
             runs: BTreeMap::new(),
+            continued: BTreeMap::new(),
             last: 0,
         };
         loop {
@@ -45,7 +48,7 @@ impl Log {
             let Some(tail) = batch.last() else { break };
             inner.last = tail.seq;
             for e in &batch {
-                apply(&mut inner.runs, e)?;
+                apply(&mut inner, e)?;
             }
         }
         Ok(Self {
@@ -72,7 +75,33 @@ impl Log {
             .append_value(run, source, kind, v, data)
             .map_err(|e| format!("event log: {e}"))?;
         inner.last = event.seq;
-        apply(&mut inner.runs, &event)?;
+        apply(&mut inner, &event)?;
+        drop(inner);
+        self.appended.notify_all();
+        Ok(event)
+    }
+
+    /// Append `run`'s task.submitted. When it continues another run, refuse
+    /// if that run was already continued, checked and appended under one lock.
+    pub fn append_task(&self, run: &str, data: Value) -> Result<Event, String> {
+        let mut inner = self.lock();
+        if let Some(prev) = data["continues"].as_str()
+            && let Some(next) = inner.continued.get(prev)
+        {
+            return Err(format!("run {prev} was already continued by {next}"));
+        }
+        let event = inner
+            .store
+            .append_value(
+                run,
+                Source::Client,
+                TaskSubmitted::TYPE,
+                TaskSubmitted::V,
+                data,
+            )
+            .map_err(|e| format!("event log: {e}"))?;
+        inner.last = event.seq;
+        apply(&mut inner, &event)?;
         drop(inner);
         self.appended.notify_all();
         Ok(event)
@@ -115,8 +144,15 @@ impl Log {
     }
 }
 
-fn apply(runs: &mut BTreeMap<String, RunView>, e: &Event) -> Result<(), String> {
-    runs.entry(e.run.clone())
+fn apply(inner: &mut Inner, e: &Event) -> Result<(), String> {
+    if e.kind == TaskSubmitted::TYPE
+        && let Some(prev) = e.data["continues"].as_str()
+    {
+        inner.continued.insert(prev.to_string(), e.run.clone());
+    }
+    inner
+        .runs
+        .entry(e.run.clone())
         .or_default()
         .apply(e)
         .map_err(|err| format!("event {}: {err}", e.seq))

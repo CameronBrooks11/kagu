@@ -673,7 +673,14 @@ fn new_run_id() -> String {
 
 /// Record a task and its first run, `submitted`. The workspace must be an
 /// absolute path to a directory; the profile a path or a profile name.
-pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
+pub fn submit(log: &Log, task: TaskSubmitted) -> Result<String, String> {
+    if task.continues.is_some() {
+        return Err("a continuation is submitted with task.continue".to_string());
+    }
+    record(log, task)
+}
+
+fn record(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
     let workspace = Path::new(&task.workspace);
     if !workspace.is_absolute() {
         return Err(format!("workspace {} is not absolute", workspace.display()));
@@ -692,13 +699,7 @@ pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
         .to_string();
     let id = new_run_id();
     let data = serde_json::to_value(&task).expect("task serializes");
-    log.append(
-        &id,
-        Source::Client,
-        TaskSubmitted::TYPE,
-        TaskSubmitted::V,
-        data,
-    )?;
+    log.append_task(&id, data)?;
     append_state(log, &id, State::Submitted)?;
     Ok(id)
 }
@@ -720,7 +721,7 @@ pub fn continue_run(log: &Log, prev: &str, input: String) -> Result<String, Stri
     if !state.is_some_and(State::is_terminal) {
         return Err(format!("run {prev} has not ended"));
     }
-    submit(
+    record(
         log,
         TaskSubmitted {
             profile: earlier.profile,

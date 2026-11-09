@@ -692,3 +692,34 @@ fn continue_needs_a_finished_run_and_a_resumable_worker() {
     drop(log);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_run_is_continued_once_and_only_through_continue() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "resumable", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let a = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &a, &Cancel::default(), &|_| None).unwrap();
+    // task.submit cannot name a run to continue.
+    let mut forged = task(&dir, &p);
+    forged.continues = Some(a.clone());
+    assert!(
+        run::submit(&log, forged)
+            .unwrap_err()
+            .contains("task.continue")
+    );
+    let b = run::continue_run(&log, &a, "next".into()).unwrap();
+    // Continuing A again, while B runs or after, is refused and names B.
+    let err = run::continue_run(&log, &a, "again".into()).unwrap_err();
+    assert!(err.contains(&b), "{err}");
+    drop(log);
+    // The rule survives a restart: the projection is rebuilt from the log.
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    assert!(
+        run::continue_run(&log, &a, "again".into())
+            .unwrap_err()
+            .contains(&b)
+    );
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

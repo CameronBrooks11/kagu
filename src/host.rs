@@ -200,7 +200,14 @@ impl Host {
     fn call(&self, method: &str, p: &Value) -> Result<Value, RpcError> {
         match method {
             "task.submit" => {
-                let task: TaskSubmitted = params(p)?;
+                let s: api::Submit = params(p)?;
+                let task = TaskSubmitted {
+                    profile: s.profile,
+                    workspace: s.workspace,
+                    input: s.input,
+                    thread: s.thread,
+                    continues: None,
+                };
                 let run = run::submit(&self.log, task).map_err(failed)?;
                 result(api::Submitted { run })
             }

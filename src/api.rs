@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{RunView, TaskSubmitted};
+use crate::event::RunView;
 
 pub const VERSION: u32 = 1;
 
@@ -35,6 +35,17 @@ pub struct NoParams {}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Done {}
+
+/// Params of `task.submit`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Submit {
+    pub profile: String,
+    pub workspace: String,
+    pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+}
 
 /// Result of `task.submit`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -87,11 +98,7 @@ pub struct Profiles {
 pub fn methods() -> Vec<(&'static str, schemars::Schema, schemars::Schema)> {
     use schemars::schema_for;
     vec![
-        (
-            "task.submit",
-            schema_for!(TaskSubmitted),
-            schema_for!(Submitted),
-        ),
+        ("task.submit", schema_for!(Submit), schema_for!(Submitted)),
         (
             "task.continue",
             schema_for!(Continue),
