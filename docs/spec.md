@@ -224,7 +224,19 @@ Each Profile owns a harness home: a directory the host creates and passes
 to the worker through the harness's state variables (`CLAUDE_CONFIG_DIR`;
 `CODEX_HOME`; OpenCode's `XDG_DATA_HOME` and `XDG_STATE_HOME`). It is
 granted read-write to every run of the profile and holds the harness's
-state: its login and transcripts.
+state: its login and transcripts. It lives at
+`$XDG_STATE_HOME/kagu/homes/<profile>`, mode 0700, and the profile names the
+variables that point at it:
+
+```toml
+[worker]
+command = ["claude-agent-acp"]
+home_env = ["CLAUDE_CONFIG_DIR"]
+system_prompt = { mode = "append", text = "..." }   # ACP session/new systemPrompt
+
+[worker.meta.claudeCode.options]                   # the adapter's _meta, as is
+settingSources = []
+```
 
 The home is state, not configuration. A worker can write it, so whatever
 one run leaves there must not configure the next (invariant 5):
@@ -404,7 +416,10 @@ restriction), the substrate is unavailable and runs that require it are
 
 ACP `session/request_permission` is advisory: the confined program decides
 whether to ask. kagu still answers, from policy first; only unresolved
-requests reach clients, and the first decision recorded wins.
+requests reach clients, and the first decision recorded wins. Until there is
+a policy engine the policy is fixed: allow (`allow_once`) when the run's
+filesystem level is `enforced`, since the sandbox is then the boundary, and
+refuse (`reject_once`) otherwise.
 
 ## Protocols
 

@@ -197,6 +197,13 @@ pub fn command(
             c.args(["--ro-bind", dir, dir]);
         }
     }
+    // DNS: where /etc/resolv.conf links out of /etc (systemd-resolved puts
+    // it under /run), mount its target too.
+    if let Ok(real) = std::fs::canonicalize("/etc/resolv.conf")
+        && !real.starts_with("/etc")
+    {
+        c.arg("--ro-bind").arg(&real).arg(&real);
+    }
     for link in SYSTEM_LINKS {
         match std::fs::read_link(link) {
             Ok(target) => {
@@ -241,6 +248,30 @@ pub fn command(
     }
     c.arg("--").arg(&program).args(&argv[1..]);
     Ok(c)
+}
+
+/// The command for `argv` under `grant`: confined when the grant's substrate
+/// was probed, otherwise run directly with a cleared environment.
+pub fn spawnable(
+    probe: Option<&Result<Probe, String>>,
+    grant: &Grant,
+    workspace: &str,
+    argv: &[String],
+    env: &[(String, String)],
+) -> Result<Command, String> {
+    match probe {
+        Some(Ok(probe)) => command(probe, grant, workspace, argv, env),
+        Some(Err(e)) => Err(format!("substrate bwrap is unavailable: {e}")),
+        None => {
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..])
+                .current_dir(workspace)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .envs(env.iter().map(|(k, v)| (k, v)));
+            Ok(c)
+        }
+    }
 }
 
 /// The worker's executable as an absolute path, looked up on the host's

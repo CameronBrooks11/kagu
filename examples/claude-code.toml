@@ -1,0 +1,27 @@
+# Claude Code through claude-agent-acp, confined by bwrap and Landlock.
+#
+# Copy to ~/.config/kagu/profiles/claude.toml, set the `ro` paths to where
+# the adapter and its Node runtime are installed, then sign in once:
+#
+#   kagu auth claude
+#
+# and run work with `kagu run --profile claude --workspace <dir> --prompt ...`.
+version = 1
+
+[worker]
+command = ["claude-agent-acp"]
+# Claude Code keeps its login and transcripts here: the profile's own home.
+home_env = ["CLAUDE_CONFIG_DIR"]
+
+# No settings file configures a run: not the home, not ~/.claude, not the
+# workspace's .claude/ (spec: Harness home).
+[worker.meta.claudeCode.options]
+settingSources = []
+
+[grant]
+substrate = "bwrap"
+network = "host"
+ro = [
+  "/home/YOU/.local/share/fnm",                # Node
+  "/home/YOU/.local/lib/claude-agent-acp",     # the adapter and Claude Code
+]

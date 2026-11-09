@@ -14,6 +14,7 @@ const USAGE: &str = "usage:
   kagu log <run> [--json]
   kagu cancel <run>
   kagu status
+  kagu auth <profile> [--method <id>]
 Every client command takes --socket <path> (default $XDG_RUNTIME_DIR/kagu/kagu.sock).";
 
 fn main() -> ExitCode {
@@ -136,6 +137,12 @@ fn cli(args: Vec<String>) -> Result<ExitCode, String> {
             let run = args.positional.first().ok_or(USAGE)?;
             args.connect()?.call("run.cancel", json!({ "run": run }))?;
             Ok(ExitCode::SUCCESS)
+        }
+        "auth" => {
+            args.only(&["method"])?;
+            let profile = args.positional.first().ok_or(USAGE)?;
+            let code = kagu::auth::auth(&profile_arg(profile)?, args.flag("method"))?;
+            Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
         }
         "status" => {
             args.only(&["socket"])?;

@@ -45,6 +45,13 @@
         }
       ]
     },
+    "PromptMode": {
+      "enum": [
+        "append",
+        "override"
+      ],
+      "type": "string"
+    },
     "Substrate": {
       "oneOf": [
         {
@@ -58,6 +65,22 @@
           "type": "string"
         }
       ]
+    },
+    "SystemPrompt": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/PromptMode"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "text"
+      ],
+      "type": "object"
     },
     "Worker": {
       "additionalProperties": false,
@@ -76,6 +99,35 @@
           "default": {},
           "description": "Environment variable name to credential reference (`env:NAME`).",
           "type": "object"
+        },
+        "home_env": {
+          "default": [],
+          "description": "Variables set to this profile's harness home, such as\n`CLAUDE_CONFIG_DIR`. With none, the profile has no home.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "meta": {
+          "additionalProperties": true,
+          "default": null,
+          "description": "The adapter's `_meta` on `session/new`, passed through unmodified.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "system_prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SystemPrompt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ACP `session/new` `systemPrompt`."
         }
       },
       "required": [

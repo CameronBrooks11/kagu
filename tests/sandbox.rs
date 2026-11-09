@@ -167,3 +167,45 @@ fn a_sandbox_that_cannot_start_is_rejected() {
     assert!(detail.contains("the sandbox did not start"), "{detail}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+#[ignore = "needs user namespaces and a unix socket; run with `just test-integration`"]
+fn permissions_are_allowed_inside_an_enforced_sandbox() {
+    let dir = scratch();
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let profile = dir.join("profile.toml");
+    std::fs::write(
+        &profile,
+        format!(
+            "version = 1\n[grant]\nsubstrate = \"bwrap\"\n[worker]\ncommand = [{stub:?}, \"ask\"]\n"
+        ),
+    )
+    .unwrap();
+    let host = Host::start(&dir, &[]);
+    let out = host
+        .cli(&["run", "--json", "--prompt", "go"])
+        .arg("--profile")
+        .arg(&profile)
+        .arg("--workspace")
+        .arg(&workspace)
+        .output()
+        .unwrap();
+    let events: Vec<Event> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        fold(&events).unwrap().state,
+        Some(State::Completed),
+        "{events:#?}"
+    );
+    let decided = events
+        .iter()
+        .find(|e| e.kind == "permission.decided")
+        .unwrap();
+    assert_eq!(decided.data["option_id"], "yes");
+    drop(host);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

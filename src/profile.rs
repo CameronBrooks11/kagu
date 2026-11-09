@@ -62,6 +62,38 @@ pub struct Worker {
     /// Environment variable name to credential reference (`env:NAME`).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Variables set to this profile's harness home, such as
+    /// `CLAUDE_CONFIG_DIR`. With none, the profile has no home.
+    #[serde(default)]
+    pub home_env: Vec<String>,
+    /// ACP `session/new` `systemPrompt`.
+    #[serde(default)]
+    pub system_prompt: Option<SystemPrompt>,
+    /// The adapter's `_meta` on `session/new`, passed through unmodified.
+    #[serde(default)]
+    pub meta: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SystemPrompt {
+    pub mode: PromptMode,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptMode {
+    Append,
+    Override,
+}
+
+/// The name a profile's home is kept under: its file name without `.toml`.
+pub fn name(path: &Path) -> Result<String, String> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{}: no profile name", path.display()))
 }
 
 /// A profile and the SHA-256 of the file it came from.

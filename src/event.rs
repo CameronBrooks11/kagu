@@ -130,6 +130,9 @@ pub struct RunAdmitted {
     /// The grant as resolved for this run.
     #[serde(default)]
     pub grant: crate::profile::Grant,
+    /// The profile's harness home, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 payload!(RunAdmitted, "run.admitted", 1);
 

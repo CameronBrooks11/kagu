@@ -530,3 +530,100 @@ fn a_read_only_path_over_the_workspace_is_rejected() {
     let detail = last.data["detail"].as_str().unwrap();
     assert!(detail.contains("contains the workspace"), "{detail}");
 }
+
+/// A stub profile with a harness home, named so its home is predictable.
+fn home_profile(dir: &Path, name: &str, mode: &str, worker_extra: &str) -> PathBuf {
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    let path = dir.join(format!("{name}.toml"));
+    std::fs::write(
+        &path,
+        format!(
+            "version = 1\n[grant]\nsubstrate = \"none\"\n[worker]\ncommand = [{stub:?}, {mode:?}]\nhome_env = [\"STUB_HOME\"]\n{worker_extra}"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// Run in-process with `state` as the host's XDG_STATE_HOME.
+fn run_with_state(dir: &Path, profile: &Path, state: &Path) -> Vec<Event> {
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let id = run::submit(&log, task(dir, profile)).unwrap();
+    let state = state.to_str().unwrap().to_string();
+    let lookup = move |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+    run::start(&log, &id, &Cancel::default(), &lookup).unwrap();
+    log.events(&id).unwrap()
+}
+
+#[test]
+fn auth_signs_the_worker_in_to_its_own_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch();
+    let state = dir.join("state");
+    let p = home_profile(&dir, "authstub", "auth", "");
+    // Before sign-in the worker asks for authentication.
+    let before = Outcome {
+        stored: run_with_state(&dir, &p, &state),
+    };
+    expect(&before, State::Failed, Some(Reason::AuthRequired));
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .args(["auth"])
+        .arg(&p)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let home = state.join("kagu/homes/authstub");
+    assert_eq!(
+        std::fs::read_to_string(home.join("credentials")).unwrap(),
+        "t0k"
+    );
+    let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    // After it, the same profile runs.
+    let after = Outcome {
+        stored: run_with_state(&dir, &p, &state),
+    };
+    expect(&after, State::Completed, None);
+    let admitted = after
+        .stored
+        .iter()
+        .find(|e| e.kind == "run.admitted")
+        .unwrap();
+    assert_eq!(admitted.data["home"], home.to_str().unwrap());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn system_prompt_and_meta_reach_the_worker() {
+    let dir = scratch();
+    let extra = "[worker.system_prompt]\nmode = \"append\"\ntext = \"be terse\"\n\
+                 [worker.meta.claudeCode.options]\nsettingSources = []\n";
+    let p = home_profile(&dir, "echo", "echo_new", extra);
+    let events = run_with_state(&dir, &p, &dir.join("state"));
+    let update = events.iter().find(|e| e.kind == "worker.update").unwrap();
+    let params: serde_json::Value =
+        serde_json::from_str(update.data["content"]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(params["systemPrompt"]["mode"], "append");
+    assert_eq!(params["systemPrompt"]["content"][0]["text"], "be terse");
+    assert_eq!(
+        params["_meta"]["claudeCode"]["options"]["settingSources"],
+        serde_json::json!([])
+    );
+    let admitted = events.iter().find(|e| e.kind == "run.admitted").unwrap();
+    for setting in ["system_prompt", "meta", "home_isolation"] {
+        assert_eq!(admitted.data["levels"][setting], "advisory", "{setting}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_example_claude_profile_loads() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/claude-code.toml");
+    let loaded = kagu::profile::load(&path).unwrap();
+    assert_eq!(loaded.profile.worker.home_env, ["CLAUDE_CONFIG_DIR"]);
+}

@@ -13,6 +13,11 @@ Status: specified and model-checked; implementation starting.
 - [docs/prior-art.md](docs/prior-art.md): what exists and how kagu differs
 - [tla/kagu.tla](tla/kagu.tla): TLA+ model of the core
 
+To run Claude Code: install `claude-agent-acp`, copy
+[examples/claude-code.toml](examples/claude-code.toml) to
+`~/.config/kagu/profiles/claude.toml` and set its paths, then `kagu auth
+claude` once.
+
 ```sh
 cargo run -- serve                       # the host, in its own terminal
 cargo run -- run --profile <file> --workspace <dir> --prompt <text>
