@@ -216,3 +216,22 @@ fn continue_from_the_cli() {
     drop(host);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+#[ignore = "binds a unix socket; run with `just test-integration`"]
+fn task_submit_refuses_a_continuation() {
+    let dir = scratch();
+    let host = Host::start(&dir, &[]);
+    let first = run_cmd(&host, &dir, "resumable").output().unwrap();
+    let run = parse(&first.stdout)[0].run.clone();
+    let mut client = kagu::client::Client::connect(&dir.join("sock").join("kagu.sock")).unwrap();
+    let err = client
+        .call(
+            "task.submit",
+            serde_json::json!({"profile": "p", "workspace": dir, "input": "x", "continues": run}),
+        )
+        .unwrap_err();
+    assert!(err.contains("continues"), "{err}");
+    drop(host);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

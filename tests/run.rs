@@ -843,3 +843,31 @@ fn a_continuation_that_never_started_does_not_end_the_chain() {
     drop(log);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_session_no_turn_ran_in_is_not_resumed() {
+    let dir = scratch();
+    // A gets a session, but its prompt is refused before any turn runs.
+    let p = stub_profile(&dir, "prompt_auth", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let a = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &a, &Cancel::default(), &|_| None).unwrap();
+    assert!(
+        log.events(&a)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "worker.session")
+    );
+    // The continuation, against a worker that can resume, opens a new session.
+    assert_eq!(stub_profile(&dir, "resumable", ""), p);
+    let b = run::continue_run(&log, &a, "again".into()).unwrap();
+    run::start(&log, &b, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&b).unwrap(),
+    };
+    expect(&o, State::Completed, None);
+    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    assert_eq!(update.data["content"]["text"], "resumed ");
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

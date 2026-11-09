@@ -388,28 +388,26 @@ impl Actor<'_> {
         };
         let worker = &loaded.profile.worker;
         // A continuation resumes the earlier run's worker session.
-        // A continuation resumes the nearest run back along its chain that
-        // reached a worker session: one that ended before it did is skipped.
+        // A continuation resumes its chain's session if a turn ever ran in it,
+        // as the log shows by worker output; a session no turn ran in holds
+        // nothing, and the harness may not know it, so it starts a new one.
+        // A resume keeps the session id, so the whole chain shares it.
         let mut resume = None;
         let mut back = task.continues.clone();
         while let Some(prev) = back {
             let events = self.log.events(&prev)?;
-            let session = events
-                .iter()
-                .rev()
-                .find(|e| e.kind == WorkerSession::TYPE)
-                .and_then(|e| e.data["session_id"].as_str().map(str::to_string));
-            if session.is_some() {
-                resume = session;
+            if events.iter().any(|e| e.kind == WorkerUpdate::TYPE) {
+                resume = events
+                    .iter()
+                    .rev()
+                    .find(|e| e.kind == WorkerSession::TYPE)
+                    .and_then(|e| e.data["session_id"].as_str().map(str::to_string));
                 break;
             }
             back = events
                 .iter()
                 .find(|e| e.kind == TaskSubmitted::TYPE)
                 .and_then(|e| e.data["continues"].as_str().map(str::to_string));
-            if back.is_none() {
-                return self.reject(format!("run {prev} has no worker session to resume"));
-            }
         }
         let mut env = Vec::new();
         for (name, reference) in &worker.env {
