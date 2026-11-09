@@ -97,6 +97,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      # `changes` must have succeeded: if jobs were never created, as in a
+      # GitHub outage, no result is a failure, and only this catches it.
+      - if: needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
       - run: echo 'All checks passed or were skipped'
