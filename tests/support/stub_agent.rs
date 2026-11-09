@@ -98,6 +98,19 @@ fn main() {
                         println!("plain stdout {secret}");
                         error(&id, -32603, &secret);
                     }
+                    "leak_stop" => {
+                        // Routes a JSON-escaped value can hide in.
+                        eprintln!("{}", json!({"log": secret}));
+                        println!("{}", json!([secret]));
+                        send(
+                            json!({"jsonrpc": "2.0", "method": "session/update", "params": {
+                            "sessionId": "s1",
+                            "update": {"sessionUpdate": "agent_message_chunk",
+                                       "content": {"type": "text", "text": "k"},
+                                       secret.as_str(): 1}}}),
+                        );
+                        reply(&id, json!({"stopReason": secret}));
+                    }
                     "noise" => {
                         println!("not json");
                         reply(&id, json!({"stopReason": "end_turn"}));

@@ -6,7 +6,7 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ExitStatus};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -64,7 +64,7 @@ fn read_line(r: &mut impl BufRead, buf: &mut Vec<u8>) -> io::Result<Option<bool>
 }
 
 /// Forward each line as a message: lossy UTF-8, so no byte ends the stream.
-fn forward(stream: impl io::Read, name: &'static str, tx: &Sender<Msg>, json: bool) {
+fn forward(stream: impl io::Read, name: &'static str, tx: &SyncSender<Msg>, json: bool) {
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::new();
     while let Ok(Some(truncated)) = read_line(&mut reader, &mut buf) {
@@ -94,7 +94,8 @@ fn forward(stream: impl io::Read, name: &'static str, tx: &Sender<Msg>, json: bo
 impl Conn {
     /// Take the child's piped stdio and watch for its exit.
     pub fn attach(mut child: Child) -> Self {
-        let (tx, rx) = channel();
+        // Bounded: a worker that outpaces the log blocks on its own pipe.
+        let (tx, rx) = sync_channel(1024);
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
         let stdin = child.stdin.take();

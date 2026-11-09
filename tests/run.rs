@@ -177,41 +177,50 @@ fn admission_rejections() {
     expect(&kagu(&dir, &p, &[]), State::Rejected, Some(Reason::Error));
 }
 
-#[test]
-fn credentials_never_reach_the_log() {
-    // A quote and a backslash: JSON escaping must not hide the value from redaction.
-    let secret = r#"s3c"ret\value-123"#;
+fn leak(mode: &str, secret: &str) -> Outcome {
     let dir = scratch();
-    let p = stub_profile(
-        &dir,
-        "leak",
-        "[worker.env]\nSTUB_SECRET = \"env:KAGU_TEST_SECRET\"\n",
-    );
-    let o = kagu(&dir, &p, &[("KAGU_TEST_SECRET", secret)]);
-    expect(&o, State::Failed, Some(Reason::Error));
-    // The stub echoed it in agentInfo, sessionId, an update, a notification
-    // kept raw, stderr, plain stdout and an error message.
-    // Check every decoded string, for the value and its JSON-escaped form.
-    fn strings(v: &serde_json::Value, out: &mut Vec<String>) {
-        match v {
-            serde_json::Value::String(s) => out.push(s.clone()),
-            serde_json::Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
-            serde_json::Value::Object(o) => o.values().for_each(|v| strings(v, out)),
-            _ => {}
-        }
+    let env = "[worker.env]\nSTUB_SECRET = \"env:KAGU_TEST_SECRET\"\n";
+    let p = stub_profile(&dir, mode, env);
+    kagu(&dir, &p, &[("KAGU_TEST_SECRET", secret)])
+}
+
+/// Every string in every event, keys included.
+fn strings(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => out.push(s.clone()),
+        serde_json::Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
+        serde_json::Value::Object(o) => o.iter().for_each(|(k, v)| {
+            out.push(k.clone());
+            strings(v, out);
+        }),
+        _ => {}
     }
+}
+
+fn assert_absent(o: &Outcome, secret: &str) {
+    let escaped = serde_json::to_string(secret).unwrap();
+    let escaped = escaped.trim_matches('"');
     let mut all = Vec::new();
     for e in &o.stored {
         strings(&e.data, &mut all);
     }
-    let escaped = serde_json::to_string(secret).unwrap();
-    let escaped = escaped.trim_matches('"');
     for s in &all {
         assert!(
             !s.contains(secret) && !s.contains(escaped),
             "secret in log: {s}"
         );
     }
+}
+
+#[test]
+fn credentials_never_reach_the_log() {
+    // A quote and a backslash: JSON escaping must not hide the value.
+    let secret = r#"s3c"ret\value-123"#;
+    // agentInfo, sessionId, an update, a raw notification, stderr, plain
+    // stdout, an error message.
+    let o = leak("leak", secret);
+    expect(&o, State::Failed, Some(Reason::Error));
+    assert_absent(&o, secret);
     let admitted = o.stored.iter().find(|e| e.kind == "run.admitted").unwrap();
     assert_eq!(admitted.data["env"]["STUB_SECRET"], "env:KAGU_TEST_SECRET");
     let session = o
@@ -220,6 +229,20 @@ fn credentials_never_reach_the_log() {
         .find(|e| e.kind == "worker.session")
         .unwrap();
     assert_eq!(session.data["session_id"], "env:KAGU_TEST_SECRET");
+
+    // JSON on stderr, non-object JSON on stdout, an object key, a stop reason.
+    let o = leak("leak_stop", secret);
+    expect(&o, State::Failed, Some(Reason::UnknownStopReason));
+    assert_absent(&o, secret);
+}
+
+#[test]
+fn a_short_secret_does_not_rewrite_kagus_own_fields() {
+    // "e" occurs in "exited", "failed", "run.state" and more.
+    let o = leak("leak_stop", "e");
+    expect(&o, State::Failed, Some(Reason::UnknownStopReason));
+    let kinds: Vec<&str> = o.stored.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"worker.exited") && kinds.contains(&"run.admitted"));
 }
 
 #[test]

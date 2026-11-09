@@ -67,9 +67,8 @@ struct Actor<'a> {
 }
 
 impl Actor<'_> {
-    /// Append one event. Every payload passes redaction here (Invariant 13).
     fn log<P: Payload>(&mut self, source: Source, payload: &P) -> Result<(), String> {
-        let data = self.redact(serde_json::to_value(payload).expect("payload serializes"));
+        let data = serde_json::to_value(payload).expect("payload serializes");
         let event = self
             .store
             .append_value(&self.id, source, P::TYPE, P::V, data)
@@ -90,19 +89,47 @@ impl Actor<'_> {
         Ok(())
     }
 
+    fn redact_str(&self, mut s: String) -> String {
+        for (secret, reference) in &self.secrets {
+            if s.contains(secret.as_str()) {
+                s = s.replace(secret.as_str(), reference);
+            }
+        }
+        s
+    }
+
+    /// Replace injected credential values in worker data, keys included.
     fn redact(&self, value: Value) -> Value {
         match value {
-            Value::String(mut s) => {
-                for (secret, reference) in &self.secrets {
-                    if s.contains(secret.as_str()) {
-                        s = s.replace(secret.as_str(), reference);
-                    }
-                }
-                Value::String(s)
-            }
+            Value::String(s) => Value::String(self.redact_str(s)),
             Value::Array(a) => Value::Array(a.into_iter().map(|v| self.redact(v)).collect()),
-            Value::Object(o) => {
-                Value::Object(o.into_iter().map(|(k, v)| (k, self.redact(v))).collect())
+            Value::Object(o) => Value::Object(
+                o.into_iter()
+                    .map(|(k, v)| (self.redact_str(k), self.redact(v)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// Redact a raw line as it arrives (Invariant 13). Text that parses as
+    /// JSON is redacted as JSON, before escaping can hide a value. Protocol
+    /// messages pass unchanged: kagu must read the real message, and redacts
+    /// each part of it that it stores.
+    fn clean(&self, msg: Msg) -> Msg {
+        if self.secrets.is_empty() {
+            return msg;
+        }
+        match msg {
+            Msg::Raw { stream, text } => {
+                let text = match serde_json::from_str::<Value>(&text) {
+                    Ok(v) => {
+                        let red = self.redact(v.clone());
+                        if red == v { text } else { red.to_string() }
+                    }
+                    Err(_) => self.redact_str(text),
+                };
+                Msg::Raw { stream, text }
             }
             other => other,
         }
@@ -118,8 +145,6 @@ impl Actor<'_> {
         )
     }
 
-    /// A JSON message kept as text: redacted as JSON first, so a secret is
-    /// matched before serialization escapes it.
     fn raw_json(&mut self, msg: Value) -> Result<(), String> {
         let text = self.redact(msg).to_string();
         self.raw("stdout", text)
@@ -142,7 +167,7 @@ impl Actor<'_> {
                 },
                 None => conn.recv(),
             };
-            match msg {
+            match self.clean(msg) {
                 Msg::Closed => return Ok(Err(CallError::Exited)),
                 Msg::Exited(status) => {
                     self.exit = Some(status);
@@ -183,7 +208,8 @@ impl Actor<'_> {
             && id.is_none()
             && let Some(update) = msg.get("params").and_then(|p| p.get("update"))
         {
-            return self.log(Source::Worker, &WorkerUpdate(update.clone()));
+            let update = self.redact(update.clone());
+            return self.log(Source::Worker, &WorkerUpdate(update));
         }
         let options = msg["params"]["options"].clone();
         self.raw_json(msg)?;
@@ -220,6 +246,7 @@ impl Actor<'_> {
 
     fn fail(&mut self, err: CallError) -> Result<(), String> {
         let (reason, detail) = err.outcome();
+        let detail = detail.map(|d| self.redact_str(d));
         self.to(State::Failed, Some(reason), detail)
     }
 
@@ -308,7 +335,7 @@ impl Actor<'_> {
             Source::Worker,
             &WorkerInitialized {
                 protocol_version: version,
-                agent_info: result.get("agentInfo").cloned(),
+                agent_info: result.get("agentInfo").cloned().map(|v| self.redact(v)),
             },
         )?;
         if version != 1 {
@@ -331,7 +358,7 @@ impl Actor<'_> {
         self.log(
             Source::Worker,
             &WorkerSession {
-                session_id: session_id.clone(),
+                session_id: self.redact_str(session_id.clone()),
             },
         )?;
 
@@ -342,7 +369,7 @@ impl Actor<'_> {
                 let reason = r.get("stopReason").and_then(Value::as_str).unwrap_or("");
                 let (state, why) = stop(reason);
                 let detail = (why == Some(Reason::UnknownStopReason))
-                    .then(|| format!("stopReason {reason:?}"));
+                    .then(|| format!("stopReason {:?}", self.redact_str(reason.to_string())));
                 self.to(state, why, detail)?;
             }
             Err(e) => self.fail(e)?,
@@ -370,7 +397,7 @@ impl Actor<'_> {
         let mut killed = false;
         let mut deadline = Instant::now() + GRACE;
         while self.exit.is_none() {
-            match conn.recv_until(deadline) {
+            match conn.recv_until(deadline).map(|m| self.clean(m)) {
                 Some(Msg::Exited(s)) => self.exit = Some(s),
                 Some(Msg::Raw { stream, text }) => self.raw(stream, text)?,
                 Some(Msg::Rpc(msg)) => self.raw_json(msg)?,
@@ -385,7 +412,7 @@ impl Actor<'_> {
         }
         // Output that trails the exit, bounded: a descendant may hold stdout open.
         let deadline = Instant::now() + GRACE;
-        while let Some(msg) = conn.recv_until(deadline) {
+        while let Some(msg) = conn.recv_until(deadline).map(|m| self.clean(m)) {
             match msg {
                 Msg::Closed => break,
                 Msg::Raw { stream, text } => self.raw(stream, text)?,
