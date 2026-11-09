@@ -35,6 +35,10 @@
       },
       "type": "object"
     },
+    "profile": {
+      "description": "The profile, as named in the task.",
+      "type": "string"
+    },
     "profile_digest": {
       "description": "SHA-256 of the profile file, hex.",
       "type": "string"
@@ -44,6 +48,7 @@
     }
   },
   "required": [
+    "profile",
     "profile_digest",
     "command",
     "env",

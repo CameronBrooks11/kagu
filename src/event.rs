@@ -118,6 +118,8 @@ payload!(TaskSubmitted, "task.submitted", 1);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunAdmitted {
+    /// The profile, as named in the task.
+    pub profile: String,
     /// SHA-256 of the profile file, hex.
     pub profile_digest: String,
     pub command: Vec<String>,
@@ -139,6 +141,17 @@ pub struct RunState {
     pub detail: Option<String>,
 }
 payload!(RunState, "run.state", 1);
+
+/// `permission.decided`: the answer to a worker's permission request,
+/// recorded before it is sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionDecided {
+    /// The option chosen, or none for `cancelled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+}
+payload!(PermissionDecided, "permission.decided", 1);
 
 /// `run.verdict`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

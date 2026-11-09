@@ -26,6 +26,7 @@ pub fn all() -> Vec<(String, Value)> {
         event::<RunAdmitted>(),
         event::<RunState>(),
         event::<RunVerdict>(),
+        event::<PermissionDecided>(),
         event::<WorkerSpawned>(),
         event::<WorkerInitialized>(),
         event::<WorkerSession>(),

@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
-use crate::event::{Event, Payload, Source};
+use crate::event::{Event, Source};
 
 pub struct Store {
     conn: Connection,
@@ -16,6 +16,8 @@ impl Store {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
+        // Purged events are overwritten on disk, not just unlinked.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         // AUTOINCREMENT: a deleted seq is never reused, so seq only grows.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
@@ -33,17 +35,7 @@ impl Store {
     }
 
     /// Append one event in its own transaction and return it with its seq.
-    pub fn append<P: Payload>(
-        &self,
-        run: &str,
-        source: Source,
-        payload: &P,
-    ) -> rusqlite::Result<Event> {
-        let data = serde_json::to_value(payload).expect("payload serializes");
-        self.append_value(run, source, P::TYPE, P::V, data)
-    }
-
-    fn append_value(
+    pub fn append_value(
         &self,
         run: &str,
         source: Source,
@@ -106,5 +98,30 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+
+    #[test]
+    fn opens_with_wal_and_secure_delete() {
+        let path = std::env::temp_dir().join(format!("kagu-store-{}.db", std::process::id()));
+        let store = Store::open(&path).unwrap();
+        let mode: String = store
+            .conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        let secure: i64 = store
+            .conn
+            .pragma_query_value(None, "secure_delete", |r| r.get(0))
+            .unwrap();
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        assert_eq!(mode, "wal");
+        assert_eq!(secure, 1);
     }
 }

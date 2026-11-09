@@ -138,7 +138,10 @@ fn failures_before_and_during_the_prompt() {
         ("init_error", Reason::Error),
         ("prompt_error", Reason::Error),
         ("version_2", Reason::Error),
+        ("new_error", Reason::Error),
+        ("no_session", Reason::Error),
         ("exit_at_start", Reason::Exited),
+        ("exit_in_new", Reason::Exited),
         ("exit_in_prompt", Reason::Exited),
     ] {
         let o = run_mode(mode);
@@ -175,22 +178,118 @@ fn admission_rejections() {
 }
 
 #[test]
-fn credentials_are_references_and_redacted() {
+fn credentials_never_reach_the_log() {
+    // A quote and a backslash: JSON escaping must not hide the value from redaction.
+    let secret = r#"s3c"ret\value-123"#;
     let dir = scratch();
     let p = stub_profile(
         &dir,
-        "echo_secret",
+        "leak",
         "[worker.env]\nSTUB_SECRET = \"env:KAGU_TEST_SECRET\"\n",
     );
-    let secret = "s3cret-value-123";
     let o = kagu(&dir, &p, &[("KAGU_TEST_SECRET", secret)]);
-    expect(&o, State::Completed, None);
-    let all = serde_json::to_string(&o.stored).unwrap();
-    assert!(!all.contains(secret), "secret value reached the log");
+    expect(&o, State::Failed, Some(Reason::Error));
+    // The stub echoed it in agentInfo, sessionId, an update, a notification
+    // kept raw, stderr, plain stdout and an error message.
+    // Check every decoded string, for the value and its JSON-escaped form.
+    fn strings(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
+            serde_json::Value::Object(o) => o.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+    let mut all = Vec::new();
+    for e in &o.stored {
+        strings(&e.data, &mut all);
+    }
+    let escaped = serde_json::to_string(secret).unwrap();
+    let escaped = escaped.trim_matches('"');
+    for s in &all {
+        assert!(
+            !s.contains(secret) && !s.contains(escaped),
+            "secret in log: {s}"
+        );
+    }
     let admitted = o.stored.iter().find(|e| e.kind == "run.admitted").unwrap();
     assert_eq!(admitted.data["env"]["STUB_SECRET"], "env:KAGU_TEST_SECRET");
-    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
-    assert_eq!(update.data["content"]["text"], "env:KAGU_TEST_SECRET");
+    let session = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.session")
+        .unwrap();
+    assert_eq!(session.data["session_id"], "env:KAGU_TEST_SECRET");
+}
+
+#[test]
+fn exit_is_seen_while_a_descendant_holds_stdout() {
+    let started = std::time::Instant::now();
+    let o = run_mode("orphan_exit");
+    expect(&o, State::Failed, Some(Reason::Exited));
+    // The descendant sleeps 10 s; the run must not wait for it.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn invalid_utf8_does_not_end_the_stream() {
+    let o = run_mode("bad_utf8");
+    expect(&o, State::Completed, None);
+    let raw = o
+        .stored
+        .iter()
+        .find(|e| e.data["stream"] == "stderr")
+        .unwrap();
+    assert!(raw.data["text"].as_str().unwrap().contains('\u{FFFD}'));
+}
+
+#[test]
+fn permission_is_refused_and_recorded_before_the_answer() {
+    let o = run_mode("ask");
+    expect(&o, State::Completed, None);
+    let decided = o
+        .stored
+        .iter()
+        .position(|e| e.kind == "permission.decided")
+        .unwrap();
+    assert_eq!(o.stored[decided].data["option_id"], "no");
+    // The stub reports the answer it received in its next update.
+    let answer = o.stored[decided..]
+        .iter()
+        .find(|e| e.kind == "worker.update")
+        .unwrap();
+    let got: serde_json::Value =
+        serde_json::from_str(answer.data["content"]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(got["result"]["outcome"]["optionId"], "no");
+}
+
+#[test]
+fn unknown_requests_get_method_not_found() {
+    let o = run_mode("ask_unknown");
+    expect(&o, State::Completed, None);
+    let answer = o
+        .stored
+        .iter()
+        .rfind(|e| e.kind == "worker.update")
+        .unwrap();
+    let got: serde_json::Value =
+        serde_json::from_str(answer.data["content"]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(got["error"]["code"], -32601);
+}
+
+#[test]
+fn non_json_stdout_is_kept_raw() {
+    let o = run_mode("noise");
+    expect(&o, State::Completed, None);
+    assert!(
+        o.stored
+            .iter()
+            .any(|e| e.data["stream"] == "stdout" && e.data["text"] == "not json")
+    );
 }
 
 #[test]

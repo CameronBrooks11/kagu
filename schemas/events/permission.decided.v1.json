@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`permission.decided`: the answer to a worker's permission request,\nrecorded before it is sent.",
+  "properties": {
+    "option_id": {
+      "description": "The option chosen, or none for `cancelled`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "PermissionDecided",
+  "type": "object"
+}
