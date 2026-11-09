@@ -688,6 +688,15 @@ fn a_grant_that_makes_the_home_read_only_is_rejected() {
             .unwrap()
             .contains("contains the harness home")
     );
+    // kagu auth refuses it too.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .arg("auth")
+        .arg(&p)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("contains the harness home"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -869,5 +878,70 @@ fn a_session_no_turn_ran_in_is_not_resumed() {
     let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
     assert_eq!(update.data["content"]["text"], "resumed ");
     drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A worker with one pinned file, and a grant with `substrate`.
+fn pinned(substrate: &str) -> (kagu::profile::Worker, kagu::profile::Grant) {
+    let p: kagu::profile::Profile = toml::from_str(&format!(
+        "version = 1\n[grant]\nsubstrate = {substrate:?}\n[worker]\ncommand = [\"x\"]\nhome_env = [\"H\"]\n[worker.home_files]\n\"settings.json\" = \"{{}}\"\n"
+    ))
+    .unwrap();
+    (p.worker, p.grant)
+}
+
+#[test]
+fn runs_of_one_profile_prepare_its_home_concurrently() {
+    let dir = scratch();
+    let profile = home_profile(&dir, "busy", "end_turn", "");
+    let state = dir.join("state").to_str().unwrap().to_string();
+    for substrate in ["none", "bwrap"] {
+        let (worker, grant) = pinned(substrate);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+                    for _ in 0..50 {
+                        kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+                    }
+                });
+            }
+        });
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn under_bwrap_a_pinned_file_in_the_home_is_never_replaced() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = scratch();
+    let profile = home_profile(&dir, "bound", "end_turn", "");
+    let state = dir.join("state").to_str().unwrap().to_string();
+    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+    let (worker, grant) = pinned("bwrap");
+    let home = kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    let dest = Path::new(&home.path).join("settings.json");
+    // Another run's bind may sit on this file: replacing it would detach it.
+    let inode = std::fs::metadata(&dest).unwrap().ino();
+    std::fs::write(&dest, "planted").unwrap();
+    let again = kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    assert_eq!(std::fs::metadata(&dest).unwrap().ino(), inode);
+    // What the run sees is the bind's source, which holds the pinned text.
+    let (source, target) = &again.pins[0];
+    assert_eq!(target, dest.to_str().unwrap());
+    assert_eq!(std::fs::read_to_string(source).unwrap(), "{}");
+    // A link in its place is replaced by a file, and its target untouched.
+    let outside = dir.join("outside");
+    std::fs::write(&outside, "keep").unwrap();
+    std::fs::remove_file(&dest).unwrap();
+    std::os::unix::fs::symlink(&outside, &dest).unwrap();
+    kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    assert!(
+        !std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
     std::fs::remove_dir_all(&dir).unwrap();
 }

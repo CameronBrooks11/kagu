@@ -430,23 +430,20 @@ impl Actor<'_> {
         }
         // The profile's harness home: its state, granted read-write and named
         // by the variables the harness reads (spec: Harness home).
+        let mut pins = Vec::new();
         let home = if worker.home_env.is_empty() {
             None
         } else {
-            let home = match profile::prepare_home(env_var, &path, worker) {
+            let prepared = match profile::prepare_home(env_var, &path, worker, &grant) {
                 Ok(h) => h,
                 Err(e) => return self.reject(e),
             };
-            if let Some(ro) = grant.ro.iter().find(|ro| Path::new(&home).starts_with(ro)) {
-                return self.reject(format!("grant: ro path {ro:?} contains the harness home"));
-            }
+            let home = prepared.path;
             for var in &worker.home_env {
                 env.push((var.clone(), home.clone()));
             }
             grant.rw.push(home.clone());
-            for name in worker.home_files.keys() {
-                grant.ro.push(format!("{home}/{name}"));
-            }
+            pins = prepared.pins;
             Some(home)
         };
         let grant = &grant;
@@ -492,6 +489,7 @@ impl Actor<'_> {
             &task.workspace,
             &worker.command,
             &env,
+            &pins,
         ) {
             Ok(c) => c,
             Err(e) => return self.reject(e),

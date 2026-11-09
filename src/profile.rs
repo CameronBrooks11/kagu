@@ -110,38 +110,99 @@ pub fn home_key(path: &Path) -> Result<String, String> {
     Ok(format!("{stem}-{short}"))
 }
 
-/// Create the profile's harness home (0700) and write its `home_files`.
-/// Returns the home.
+/// A profile's harness home, ready for a run.
+pub struct Home {
+    pub path: String,
+    /// Read-only binds of pinned files, source onto destination, under bwrap.
+    pub pins: Vec<(String, String)>,
+}
+
+/// Create the profile's harness home (0700) and place its `home_files`.
+///
+/// Under bwrap each pinned file is bound read-only from an immutable,
+/// content-addressed copy in kagu's state, and the host never removes or
+/// renames a regular file in the home: that would detach the bind of a run
+/// already using it. Without a sandbox there are no binds, and each file
+/// is replaced atomically before the run.
 pub fn prepare_home(
     env: crate::paths::Env,
     path: &Path,
     worker: &Worker,
-) -> Result<String, String> {
+    grant: &Grant,
+) -> Result<Home, String> {
     use std::os::unix::fs::DirBuilderExt;
     let home = crate::paths::home(env, &home_key(path)?)?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&home)
-        .map_err(|e| format!("{}: {e}", home.display()))?;
-    for (name, text) in &worker.home_files {
+    let text = home.to_str().ok_or("home path is not UTF-8")?.to_string();
+    if let Some(ro) = grant.ro.iter().find(|ro| home.starts_with(ro)) {
+        return Err(format!("grant: ro path {ro:?} contains the harness home"));
+    }
+    let private = |dir: &Path| {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))
+    };
+    private(&home)?;
+    let bind = grant.substrate == Substrate::Bwrap;
+    let mut pins = Vec::new();
+    for (name, content) in &worker.home_files {
         let file = home.join(name);
-        // A run can leave a link here; replace it rather than follow it.
+        let err = |e: std::io::Error| format!("{}: {e}", file.display());
         match std::fs::symlink_metadata(&file) {
             Ok(m) if m.is_dir() => return Err(format!("{}: is a directory", file.display())),
-            Ok(_) => std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?,
-            Err(_) => {}
+            // A link is never a mount point: replace it, never follow it.
+            Ok(m) if m.file_type().is_symlink() => match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(err(e)),
+                _ => {}
+            },
+            _ => {}
         }
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&file)
-            .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
-            .map_err(|e| format!("{}: {e}", file.display()))?;
+        if bind {
+            // The mount point: created if missing, otherwise left alone.
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&file)
+            {
+                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(err(e)),
+                _ => {}
+            }
+            let store = crate::paths::pins(env)?;
+            private(&store)?;
+            let source = store.join(hex(&Sha256::digest(content.as_bytes())));
+            if !source.exists() {
+                replace(&source, content)?;
+            }
+            let source = source.to_str().ok_or("pin path is not UTF-8")?.to_string();
+            pins.push((source, format!("{text}/{name}")));
+        } else {
+            replace(&file, content)?;
+        }
     }
-    home.to_str()
-        .map(str::to_string)
-        .ok_or_else(|| "home path is not UTF-8".to_string())
+    Ok(Home { path: text, pins })
+}
+
+/// Write `content` to `file` by renaming a fresh file over it: concurrent
+/// writers each succeed, and a link at `file` is replaced, not followed.
+fn replace(file: &Path, content: &str) -> Result<(), String> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = file.with_file_name(format!(".{name}.kagu-{}-{n}", std::process::id()));
+    std::fs::write(&tmp, content)
+        .and_then(|()| std::fs::rename(&tmp, file))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("{}: {e}", file.display())
+        })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// A profile and the SHA-256 of the file it came from.
