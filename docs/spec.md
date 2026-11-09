@@ -96,7 +96,8 @@ and grants it; it does not create, clone or otherwise manage it.
 6. **Authority is what the process can reach.** A worker's authority is
    everything its process tree can reach, not what the Grant lists. Every
    setting is reported at one of the levels under
-   [Enforcement levels](#enforcement-levels); only `enforced` is a guarantee.
+   [Enforcement levels](#enforcement-levels), or as `unrestricted` when its
+   value requests no restriction; only `enforced` is a guarantee.
 7. **Fail closed.** A run whose profile requires a level the host or
    adapter cannot provide for a setting is `rejected` at admission.
 8. **One writer per workspace.** At most one non-terminal run holds write
@@ -139,9 +140,9 @@ stateDiagram-v2
 Not drawn: every non-terminal state goes to `canceled` on `run.cancel`, and
 to `interrupted` on host recovery.
 
-A Run sends one ACP `session/prompt`. A failure before it (`initialize`,
-`session/new`, or the worker failing to start) ends the run `failed`, with
-reason `auth_required` for ACP error `-32000` and `error` otherwise. The
+A Run sends one ACP `session/prompt`. A failure before it ends the run
+`failed`: reason `auth_required` for ACP error `-32000` from `initialize` or
+`session/new`, `exited` if the worker exited, `error` otherwise. The
 prompt's response ends execution:
 
 | Response                         | Next state  | Reason recorded       |
@@ -213,9 +214,10 @@ references. When the worker starts, its name and version from ACP
 ## Harness home
 
 Each Profile owns a harness home: a directory the host creates and passes
-to the worker through the harness's relocation variable (`CLAUDE_CONFIG_DIR`,
-`CODEX_HOME`, `XDG_*_HOME`, …). It is granted read-write to every run of the
-profile and holds the harness's state: its login and transcripts.
+to the worker through the harness's state variables (`CLAUDE_CONFIG_DIR`;
+`CODEX_HOME`; OpenCode's `XDG_DATA_HOME` and `XDG_STATE_HOME`). It is
+granted read-write to every run of the profile and holds the harness's
+state: its login and transcripts.
 
 The home is state, not configuration. A worker can write it, so whatever
 one run leaves there must not configure the next (invariant 5):
@@ -226,10 +228,14 @@ one run leaves there must not configure the next (invariant 5):
 - The harness's own configuration sources in the home are not loaded (for
   Claude Code, `settingSources` without `user`). A harness that cannot
   exclude them gets the files kagu writes bound read-only over them.
+- `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` and
+  `TMPDIR` are a fresh tmpfs per run, so dotfiles a run writes (`.bashrc`,
+  git config) are gone before the next.
 
-The worker's environment: `HOME` and `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
-`XDG_STATE_HOME` inside the home; `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` and
-`TMPDIR` on a per-run tmpfs.
+The adapter conformance suite plants configuration in the home (settings,
+hooks, MCP servers, wherever the harness reads them) and checks the next
+run ignores it. An adapter that passes reports home isolation `supported`;
+otherwise it is `advisory`.
 
 Using the user's own harness directory (for example `~/.claude`) means
 making it the home: the worker then reaches its settings, hooks and history
@@ -250,9 +256,11 @@ Authentication belongs to the worker. A profile declares one mode:
   is its harness home. The home is granted as a directory because
   harnesses replace credential files by rename and take lock files beside
   them. kagu never opens it. `kagu auth <profile>` declares
-  `clientCapabilities.auth.terminal` in ACP `initialize`, then runs a
-  `terminal` login method the worker advertises, with its `args` and `env`,
-  the profile's home and grant, attached to the user's terminal.
+  `clientCapabilities.auth.terminal` in ACP `initialize`, then runs the
+  profile's worker command with the `args` and `env` of a `terminal` login
+  method the worker advertises, attached to the user's terminal. It runs
+  with the profile's home and network `host`, since login reaches the
+  provider and may redirect the user's browser to loopback.
 - `reference`: a credential the worker reads from its environment (an API
   key) is named by reference, resolved when the worker starts, and injected
   (invariant 13).
@@ -347,7 +355,8 @@ The network field takes one of three values:
 | `host`       | the host's network namespace is shared; a request for no restriction, recorded as `unrestricted` rather than given a level |
 
 Credentials are `enforced` when the environment is cleared, only granted
-paths are mounted, and no unix socket outside the sandbox is reachable.
+paths are mounted, and no unix socket outside the sandbox is reachable
+other than the egress proxy's.
 With network `host`, abstract unix sockets are shared; they are closed only
 by Landlock scoping (ABI 6 or later), and without it credentials are
 `unsupported`. Services listening on the host's loopback are part of the
@@ -387,9 +396,10 @@ replay is always possible; purged runs appear as gaps.
 Rust types are the source. JSON Schema (2020-12) is generated from them and
 committed, one file per version: per Event `type` and `v`, per client API
 version (reported by `host.status`), and per Profile `version` (a required
-key). CI regenerates the files and fails on any difference. Adding an
-optional field is compatible; any other change to a committed schema needs
-a new version.
+key). CI regenerates the files and fails on any difference. A change is
+compatible if a newer host still reads everything an older one wrote or
+accepted: adding an optional field is; any other change needs a new
+version.
 
 Profiles are TOML. Unknown keys are refused.
 
