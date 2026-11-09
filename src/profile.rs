@@ -112,8 +112,9 @@ pub fn home_key(path: &Path) -> Result<String, String> {
 
 /// Refuse a confined grant that reaches kagu's own state: the event log,
 /// every profile's home and credentials, and the pinned files. kagu itself
-/// grants a run its own home and pins. Paths are compared as written, like
-/// the grant's other checks.
+/// grants a run its own home and pins. Each path is compared both as written
+/// and with links and `..` resolved, against the state directory both ways;
+/// a path that does not exist cannot be mounted, so it reaches nothing.
 pub fn keep_out_of_state(
     env: crate::paths::Env,
     grant: &Grant,
@@ -122,20 +123,24 @@ pub fn keep_out_of_state(
     if grant.substrate != Substrate::Bwrap {
         return Ok(());
     }
-    let state = crate::paths::state_with(env)?;
-    let state = std::fs::canonicalize(&state).unwrap_or(state);
+    let raw = crate::paths::state_with(env)?;
+    let states = [std::fs::canonicalize(&raw).ok(), Some(raw.clone())];
     for p in workspace
         .into_iter()
         .chain(grant.rw.iter().map(String::as_str))
         .chain(grant.ro.iter().map(String::as_str))
     {
-        let p = Path::new(p);
-        if p.starts_with(&state) || state.starts_with(p) {
-            return Err(format!(
-                "grant: {} reaches kagu's state {}",
-                p.display(),
-                state.display()
-            ));
+        let written = Path::new(p);
+        let spellings = [
+            std::fs::canonicalize(written).ok(),
+            Some(written.to_path_buf()),
+        ];
+        for path in spellings.iter().flatten() {
+            for state in states.iter().flatten() {
+                if path.starts_with(state) || state.starts_with(path) {
+                    return Err(format!("grant: {p} reaches kagu's state {}", raw.display()));
+                }
+            }
         }
     }
     Ok(())
