@@ -171,9 +171,9 @@ pub fn prepare_home(
             let store = crate::paths::pins(env)?;
             private(&store)?;
             let source = store.join(hex(&Sha256::digest(content.as_bytes())));
-            if !source.exists() {
-                replace(&source, content)?;
-            }
+            // Rewritten every time: what is there is not trusted. A run
+            // already bound to it keeps the inode it was given.
+            replace(&source, content)?;
             let source = source.to_str().ok_or("pin path is not UTF-8")?.to_string();
             pins.push((source, format!("{text}/{name}")));
         } else {
