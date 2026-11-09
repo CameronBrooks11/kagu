@@ -17,6 +17,15 @@ pub struct RunRef {
     pub run: String,
 }
 
+/// Params of `task.continue`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Continue {
+    /// The run to continue.
+    pub run: String,
+    pub input: String,
+}
+
 /// Params of methods that take none.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +90,11 @@ pub fn methods() -> Vec<(&'static str, schemars::Schema, schemars::Schema)> {
         (
             "task.submit",
             schema_for!(TaskSubmitted),
+            schema_for!(Submitted),
+        ),
+        (
+            "task.continue",
+            schema_for!(Continue),
             schema_for!(Submitted),
         ),
         ("run.start", schema_for!(RunRef), schema_for!(Done)),

@@ -46,6 +46,7 @@ fn task(dir: &Path, profile: &Path) -> TaskSubmitted {
         workspace: dir.to_str().unwrap().into(),
         input: "do the thing".into(),
         thread: None,
+        continues: None,
     }
 }
 
@@ -626,4 +627,68 @@ fn the_example_claude_profile_loads() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/claude-code.toml");
     let loaded = kagu::profile::load(&path).unwrap();
     assert_eq!(loaded.profile.worker.home_env, ["CLAUDE_CONFIG_DIR"]);
+}
+
+#[test]
+fn continue_resumes_the_earlier_session_in_its_thread() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "resumable", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let first = run::submit(&log, task(&dir, &p)).unwrap();
+    run::start(&log, &first, &Cancel::default(), &|_| None).unwrap();
+    let next = run::continue_run(&log, &first, "and then".into()).unwrap();
+    run::start(&log, &next, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&next).unwrap(),
+    };
+    expect(&o, State::Completed, None);
+    let submitted = &o.stored[0].data;
+    assert_eq!(submitted["continues"], first.as_str());
+    assert_eq!(submitted["thread"], first.as_str());
+    assert_eq!(submitted["input"], "and then");
+    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    assert_eq!(update.data["content"]["text"], "resumed s1");
+    // A third run keeps the same thread.
+    let third = run::continue_run(&log, &next, "more".into()).unwrap();
+    assert_eq!(
+        log.events(&third).unwrap()[0].data["thread"],
+        first.as_str()
+    );
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn continue_needs_a_finished_run_and_a_resumable_worker() {
+    let dir = scratch();
+    let p = stub_profile(&dir, "end_turn", "");
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let unstarted = run::submit(&log, task(&dir, &p)).unwrap();
+    assert!(
+        run::continue_run(&log, &unstarted, "x".into())
+            .unwrap_err()
+            .contains("not ended")
+    );
+    run::start(&log, &unstarted, &Cancel::default(), &|_| None).unwrap();
+    // This stub does not offer session/resume.
+    let next = run::continue_run(&log, &unstarted, "x".into()).unwrap();
+    run::start(&log, &next, &Cancel::default(), &|_| None).unwrap();
+    let o = Outcome {
+        stored: log.events(&next).unwrap(),
+    };
+    expect(&o, State::Failed, Some(Reason::Error));
+    let last = o
+        .stored
+        .iter()
+        .rev()
+        .find(|e| e.kind == "run.state")
+        .unwrap();
+    assert!(
+        last.data["detail"]
+            .as_str()
+            .unwrap()
+            .contains("session/resume")
+    );
+    drop(log);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

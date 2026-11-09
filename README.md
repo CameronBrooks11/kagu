@@ -22,6 +22,7 @@ claude` once.
 cargo run -- serve                       # the host, in its own terminal
 cargo run -- run --profile <file> --workspace <dir> --prompt <text>
 cargo run -- watch <run>                 # from another terminal
+cargo run -- continue <run> --prompt <text>
 cargo run -- cancel <run>
 
 just check   # format and lint

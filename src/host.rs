@@ -204,6 +204,11 @@ impl Host {
                 let run = run::submit(&self.log, task).map_err(failed)?;
                 result(api::Submitted { run })
             }
+            "task.continue" => {
+                let c: api::Continue = params(p)?;
+                let run = run::continue_run(&self.log, &c.run, c.input).map_err(failed)?;
+                result(api::Submitted { run })
+            }
             "run.start" => {
                 self.start(params::<api::RunRef>(p)?.run)?;
                 result(api::Done {})

@@ -388,6 +388,25 @@ impl Actor<'_> {
             Err(e) => return self.reject(e),
         };
         let worker = &loaded.profile.worker;
+        // A continuation resumes the earlier run's worker session.
+        let resume = match &task.continues {
+            None => None,
+            Some(prev) => {
+                let session = self
+                    .log
+                    .events(prev)?
+                    .iter()
+                    .rev()
+                    .find(|e| e.kind == WorkerSession::TYPE)
+                    .and_then(|e| e.data["session_id"].as_str().map(str::to_string));
+                match session {
+                    Some(s) => Some(s),
+                    None => {
+                        return self.reject(format!("run {prev} has no worker session to resume"));
+                    }
+                }
+            }
+        };
         let mut env = Vec::new();
         for (name, reference) in &worker.env {
             let var = profile::reference_var(reference).expect("validated at load");
@@ -522,20 +541,33 @@ impl Actor<'_> {
             return self.to(State::Failed, Some(Reason::Error), Some(detail));
         }
 
-        let mut new = json!({"cwd": task.workspace, "mcpServers": []});
+        let mut params = json!({"cwd": task.workspace, "mcpServers": []});
         if let Some(p) = &worker.system_prompt {
-            new["systemPrompt"] =
+            params["systemPrompt"] =
                 json!({"mode": p.mode, "content": [{"type": "text", "text": p.text}]});
         }
         if let Some(meta) = &worker.meta {
-            new["_meta"] = Value::Object(meta.clone());
+            params["_meta"] = Value::Object(meta.clone());
         }
-        let session = match self.call("session/new", new)? {
-            Ok(r) => r
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            Err(e) => return self.fail(e),
+        let session = match &resume {
+            None => match self.call("session/new", params)? {
+                Ok(r) => r
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                Err(e) => return self.fail(e),
+            },
+            Some(id) => {
+                if !result["agentCapabilities"]["sessionCapabilities"]["resume"].is_object() {
+                    let detail = "the worker does not offer session/resume".to_string();
+                    return self.to(State::Failed, Some(Reason::Error), Some(detail));
+                }
+                params["sessionId"] = json!(id);
+                match self.call("session/resume", params)? {
+                    Ok(_) => Some(id.clone()),
+                    Err(e) => return self.fail(e),
+                }
+            }
         };
         let Some(session_id) = session else {
             let detail = "session/new returned no sessionId".to_string();
@@ -674,6 +706,31 @@ pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
 /// Where credential references and the state directory are resolved: the
 /// host's environment.
 pub use crate::paths::Env;
+
+/// Record a task that continues `prev` with `input`: the same profile and
+/// workspace, in the same thread, resuming `prev`'s worker session.
+pub fn continue_run(log: &Log, prev: &str, input: String) -> Result<String, String> {
+    let events = log.events(prev)?;
+    let earlier: TaskSubmitted = events
+        .iter()
+        .find(|e| e.kind == TaskSubmitted::TYPE)
+        .ok_or_else(|| format!("no run {prev}"))
+        .and_then(|e| serde_json::from_value(e.data.clone()).map_err(|e| e.to_string()))?;
+    let state = fold(&events).map_err(|e| e.to_string())?.state;
+    if !state.is_some_and(State::is_terminal) {
+        return Err(format!("run {prev} has not ended"));
+    }
+    submit(
+        log,
+        TaskSubmitted {
+            profile: earlier.profile,
+            workspace: earlier.workspace,
+            input,
+            thread: earlier.thread.or_else(|| Some(prev.to_string())),
+            continues: Some(prev.to_string()),
+        },
+    )
+}
 
 /// Drive a submitted run to a terminal state. Runs on the run's own thread.
 pub fn start(log: &Log, id: &str, cancel: &Cancel, env_var: Env) -> Result<(), String> {

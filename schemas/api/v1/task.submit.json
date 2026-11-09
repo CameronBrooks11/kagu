@@ -4,6 +4,13 @@
     "additionalProperties": false,
     "description": "`task.submitted`: the intent, as the client gave it.",
     "properties": {
+      "continues": {
+        "description": "The run this task continues, resuming its worker session.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "input": {
         "type": "string"
       },

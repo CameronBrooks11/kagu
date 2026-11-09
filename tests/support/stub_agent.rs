@@ -48,6 +48,7 @@ fn main() {
     }
     let mut prompt_id = Value::Null;
     let mut new_params = Value::Null;
+    let mut resumed: Option<String> = None;
     for line in std::io::stdin().lock().lines() {
         let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let id = msg["id"].clone();
@@ -81,6 +82,11 @@ fn main() {
                 };
                 reply(&id, json!({"protocolVersion": 1, "authMethods": methods}));
             }
+            ("initialize", "resumable") => reply(
+                &id,
+                json!({"protocolVersion": 1,
+                       "agentCapabilities": {"sessionCapabilities": {"resume": {}}}}),
+            ),
             ("initialize", _) => {
                 if mode == "bad_utf8" {
                     std::io::stderr().write_all(b"\xff\xfe bytes\n").unwrap();
@@ -106,6 +112,10 @@ fn main() {
                 if !std::path::Path::new(&format!("{home}/credentials")).exists() =>
             {
                 error(&id, -32000, "login required")
+            }
+            ("session/resume", _) => {
+                resumed = msg["params"]["sessionId"].as_str().map(str::to_string);
+                reply(&id, json!({}));
             }
             ("session/new", "echo_new") => {
                 new_params = msg["params"].clone();
@@ -159,6 +169,10 @@ fn main() {
                         )
                         .unwrap_or_default();
                         update(&probe(&req).to_string());
+                        reply(&id, json!({"stopReason": "end_turn"}));
+                    }
+                    "resumable" => {
+                        update(&format!("resumed {}", resumed.clone().unwrap_or_default()));
                         reply(&id, json!({"stopReason": "end_turn"}));
                     }
                     "echo_new" => {

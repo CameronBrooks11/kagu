@@ -192,3 +192,27 @@ fn the_socket_is_private_and_single() {
     drop(host);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+#[ignore = "binds a unix socket; run with `just test-integration`"]
+fn continue_from_the_cli() {
+    let dir = scratch();
+    let host = Host::start(&dir, &[]);
+    let first = run_cmd(&host, &dir, "resumable").output().unwrap();
+    let run = parse(&first.stdout)[0].run.clone();
+    let next = host
+        .cli(&["continue", &run, "--json", "--prompt", "and then"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        next.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&next.stderr)
+    );
+    let events = parse(&next.stdout);
+    assert_eq!(events[0].data["continues"], run.as_str());
+    assert_eq!(fold(&events).unwrap().state, Some(State::Completed));
+    drop(host);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -1,0 +1,37 @@
+{
+  "params": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Params of `task.continue`.",
+    "properties": {
+      "input": {
+        "type": "string"
+      },
+      "run": {
+        "description": "The run to continue.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "run",
+      "input"
+    ],
+    "title": "Continue",
+    "type": "object"
+  },
+  "result": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Result of `task.submit`.",
+    "properties": {
+      "run": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "run"
+    ],
+    "title": "Submitted",
+    "type": "object"
+  }
+}
