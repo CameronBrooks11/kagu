@@ -1,5 +1,10 @@
 # Claude Code through claude-agent-acp, confined by bwrap and Landlock.
 #
+# The sandbox's PATH is /usr/local/bin:/usr/bin:/bin, so the command must
+# reach Node by absolute path: a wrapper that execs it, or
+# command = ["/path/to/node", "/path/to/claude-agent-acp/dist/index.js"].
+# An npm shim starting `#!/usr/bin/env node` finds no node there.
+#
 # Copy to ~/.config/kagu/profiles/claude.toml, set the `ro` paths to where
 # the adapter and its Node runtime are installed, then sign in once:
 #
@@ -13,10 +18,15 @@ command = ["claude-agent-acp"]
 # Claude Code keeps its login and transcripts here: the profile's own home.
 home_env = ["CLAUDE_CONFIG_DIR"]
 
-# No settings file configures a run: not the home, not ~/.claude, not the
+# Claude Code loads no settings file: not the home's, not ~/.claude, not the
 # workspace's .claude/ (spec: Harness home).
 [worker.meta.claudeCode.options]
 settingSources = []
+
+# The adapter itself reads the home's settings.json whatever settingSources
+# says, so kagu rewrites it before every run and mounts it read-only.
+[worker.home_files]
+"settings.json" = "{}"
 
 [grant]
 substrate = "bwrap"

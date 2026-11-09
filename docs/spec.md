@@ -233,8 +233,9 @@ to the worker through the harness's state variables (`CLAUDE_CONFIG_DIR`;
 `CODEX_HOME`; OpenCode's `XDG_DATA_HOME` and `XDG_STATE_HOME`). It is
 granted read-write to every run of the profile and holds the harness's
 state: its login and transcripts. It lives at
-`$XDG_STATE_HOME/kagu/homes/<profile>`, mode 0700, and the profile names the
-variables that point at it:
+`$XDG_STATE_HOME/kagu/homes/<name>-<digest>`, mode 0700, where the digest is
+of the profile file's canonical path, so two profile files never share a
+home. The profile names the variables that point at it:
 
 ```toml
 [worker]
@@ -244,6 +245,9 @@ system_prompt = { mode = "append", text = "..." }   # ACP session/new systemProm
 
 [worker.meta.claudeCode.options]                   # the adapter's _meta, as is
 settingSources = []
+
+[worker.home_files]                                # rewritten before every run
+"settings.json" = "{}"
 ```
 
 The home is state, not configuration. A worker can write it, so whatever
@@ -253,8 +257,12 @@ one run leaves there must not configure the next (invariant 5):
   servers), `session/set_mode`, `session/set_config_option`, the
   adapter's `_meta` options, or the environment. `run.admitted` records it.
 - The harness's own configuration sources in the home are not loaded (for
-  Claude Code, `settingSources` without `user`). A harness that cannot
-  exclude them gets the files kagu writes bound read-only over them.
+  Claude Code, `settingSources` without `user`). Where a harness reads one
+  regardless, the profile names it in `home_files`: kagu rewrites it before
+  every run, replacing rather than following a link, and under bwrap mounts
+  it read-only. claude-agent-acp is such a harness: its settings manager
+  reads `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode`
+  and model limits) whatever `settingSources` says.
 - `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` and
   `TMPDIR` are a fresh tmpfs per run, so dotfiles a run writes (`.bashrc`,
   git config) are gone before the next.

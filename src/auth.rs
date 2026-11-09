@@ -2,7 +2,6 @@
 //! login, in the profile's harness home (spec: Auth). kagu never sees the
 //! credentials: the worker writes them to its home.
 
-use std::os::unix::fs::DirBuilderExt;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -25,13 +24,7 @@ pub fn auth(profile_arg: &str, method: Option<&str>) -> Result<i32, String> {
         return Err("the profile has no harness home (worker.home_env)".into());
     }
     let env_var = |k: &str| std::env::var(k).ok();
-    let home = crate::paths::home(&env_var, &profile::name(&path)?)?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&home)
-        .map_err(|e| format!("{}: {e}", home.display()))?;
-    let home = home.to_str().ok_or("home path is not UTF-8")?.to_string();
+    let home = profile::prepare_home(&env_var, &path, worker)?;
     let mut env: Vec<(String, String)> = worker
         .home_env
         .iter()

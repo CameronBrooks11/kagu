@@ -175,6 +175,18 @@ fn main() {
                         update(&format!("resumed {}", resumed.clone().unwrap_or_default()));
                         reply(&id, json!({"stopReason": "end_turn"}));
                     }
+                    "auth" => {
+                        // Read the pinned file, then try to plant over it.
+                        let settings = format!("{home}/settings.json");
+                        let found = std::fs::read_to_string(&settings).ok();
+                        let planted = std::fs::write(&settings, "planted").is_ok();
+                        let transcript = std::fs::write(format!("{home}/transcript"), "t").is_ok();
+                        update(
+                            &json!({"settings": found, "planted": planted, "transcript": transcript})
+                                .to_string(),
+                        );
+                        reply(&id, json!({"stopReason": "end_turn"}));
+                    }
                     "echo_new" => {
                         update(&new_params.to_string());
                         reply(&id, json!({"stopReason": "end_turn"}));

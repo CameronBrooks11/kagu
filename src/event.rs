@@ -136,6 +136,11 @@ pub struct RunAdmitted {
     /// The profile's harness home, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
+    /// The worker settings passed on `session/new`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<crate::profile::SystemPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Map<String, Value>>,
 }
 payload!(RunAdmitted, "run.admitted", 1);
 

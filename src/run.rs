@@ -3,7 +3,6 @@
 //! (Invariant 1).
 
 use std::io::Read;
-use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
@@ -431,18 +430,10 @@ impl Actor<'_> {
         let home = if worker.home_env.is_empty() {
             None
         } else {
-            let home = match profile::name(&path).and_then(|n| crate::paths::home(env_var, &n)) {
+            let home = match profile::prepare_home(env_var, &path, worker) {
                 Ok(h) => h,
                 Err(e) => return self.reject(e),
             };
-            if let Err(e) = std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&home)
-            {
-                return self.reject(format!("{}: {e}", home.display()));
-            }
-            let home = home.to_str().ok_or("home path is not UTF-8")?.to_string();
             if let Some(ro) = grant.ro.iter().find(|ro| Path::new(&home).starts_with(ro)) {
                 return self.reject(format!("grant: ro path {ro:?} contains the harness home"));
             }
@@ -450,6 +441,9 @@ impl Actor<'_> {
                 env.push((var.clone(), home.clone()));
             }
             grant.rw.push(home.clone());
+            for name in worker.home_files.keys() {
+                grant.ro.push(format!("{home}/{name}"));
+            }
             Some(home)
         };
         let grant = &grant;
@@ -484,6 +478,8 @@ impl Actor<'_> {
                 levels,
                 grant: grant.clone(),
                 home,
+                system_prompt: worker.system_prompt.clone(),
+                meta: worker.meta.clone(),
             },
         )?;
 
