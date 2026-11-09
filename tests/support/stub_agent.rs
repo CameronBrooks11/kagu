@@ -190,6 +190,11 @@ fn probe(req: &Value) -> Value {
         "env_leaked".into(),
         json!(std::env::var_os("KAGU_TEST_LEAK").is_some()),
     );
+    // Writable to its own process without Landlock; no mount hides it.
+    out.insert(
+        "write_proc_comm".into(),
+        json!(std::fs::write("/proc/self/comm", "stub").is_ok()),
+    );
     let addr =
         std::os::unix::net::SocketAddr::from_abstract_name(path("abstract").as_bytes()).unwrap();
     out.insert(

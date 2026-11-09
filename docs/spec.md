@@ -351,17 +351,20 @@ setting whose value requests no restriction (network `host`) is recorded as
 The host starts `bwrap`, which builds the mount, PID and network
 namespaces and runs `kagu sandbox-init` inside them. That helper applies
 Landlock to itself with every right the host's probe found, refuses to run
-the worker if the ruleset is not fully enforced, and execs the worker.
-Landlock comes last because a Landlock-restricted process cannot mount. The
-host probes once, by running `sandbox-init --probe` inside `bwrap`: one
-call shows both that a user namespace can be created and which Landlock ABI
-is in force.
+the worker if the ruleset is not fully enforced, writes a readiness line to
+stderr, and execs the worker. Landlock comes last because a
+Landlock-restricted process cannot mount. A run reaches `working` only after
+that line; a sandbox that fails to start rejects the run. The host probes
+on first use, by running `sandbox-init --probe` inside `bwrap`: one call
+shows both that a user namespace can be created and which Landlock ABI is in
+force. A successful probe is kept; a failed one is retried by the next run.
 
 Inside, the worker sees the system directories read-only, its workspace and
 the grant's `rw` paths read-write, the grant's `ro` paths and its own
-executable read-only, and a fresh tmpfs at `/tmp` holding `HOME` and the
-XDG directories. Its environment is set on `bwrap` itself, never passed as
-arguments, which any process of the same user can read.
+executable read-only (mounted after the writable paths, so a read-only path
+inside a writable one stays read-only), and a fresh tmpfs at `/tmp` holding
+`HOME` and the XDG directories. Its environment is set on `bwrap` itself,
+never passed as arguments, which every user can read in `/proc`.
 
 A profile's grant:
 

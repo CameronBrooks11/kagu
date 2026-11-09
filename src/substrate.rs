@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use landlock::{
     ABI, Access, AccessFs, CompatLevel, Compatible, LandlockStatus, Ruleset, RulesetAttr,
@@ -22,6 +22,10 @@ const MIN_BWRAP: (u32, u32) = (0, 8);
 /// Landlock ABI from which abstract unix sockets and signals can be scoped.
 const SCOPE_ABI: u32 = 6;
 
+/// The line `sandbox-init` writes to stderr once the sandbox is built and
+/// Landlock enforced, just before it execs the worker.
+pub const READY: &str = "kagu-sandbox-ready";
+
 /// What the host found when it tried the substrate.
 #[derive(Debug, Clone)]
 pub struct Probe {
@@ -29,10 +33,17 @@ pub struct Probe {
     pub landlock_abi: u32,
 }
 
-/// The substrate probe, run once per host.
-pub fn probe() -> &'static Result<Probe, String> {
-    static PROBE: OnceLock<Result<Probe, String>> = OnceLock::new();
-    PROBE.get_or_init(run_probe)
+/// The substrate probe, run on first use. Only success is kept: a failure
+/// is tried again by the next run that needs the substrate.
+pub fn probe() -> Result<Probe, String> {
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    let mut kept = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = kept.as_ref() {
+        return Ok(p.clone());
+    }
+    let p = run_probe()?;
+    *kept = Some(p.clone());
+    Ok(p)
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -197,18 +208,21 @@ pub fn command(
             Err(_) => {}
         }
     }
+    // Read-write first, read-only after: bwrap mounts in order, so a
+    // read-only path inside a writable one is mounted on top and stays
+    // read-only (kagu's own executable inside its workspace, for one).
+    for p in grant.rw.iter().map(String::as_str).chain([workspace]) {
+        c.args(["--bind", p, p]);
+    }
     c.arg("--ro-bind").arg(&exe).arg(&exe);
     c.arg("--ro-bind").arg(&program).arg(&program);
     for p in &grant.ro {
         c.args(["--ro-bind", p, p]);
     }
-    for p in grant.rw.iter().map(String::as_str).chain([workspace]) {
-        c.args(["--bind", p, p]);
-    }
     c.args(["--dir", HOME, "--chdir", workspace]);
     // The environment is bwrap's own, which it passes on: cleared, then only
-    // what the worker should see. Never arguments, which any process of
-    // this user can read in /proc.
+    // what the worker should see. Never arguments, which every user can read
+    // in /proc; an environment is readable only by the same user.
     let home = Path::new(HOME);
     c.env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -304,6 +318,7 @@ pub fn sandbox_init(args: &[String]) -> Result<(), String> {
             status.ruleset
         ));
     }
+    eprintln!("{READY}");
     let err = Command::new(program).args(&argv[1..]).exec();
     Err(format!("exec {program}: {err}"))
 }

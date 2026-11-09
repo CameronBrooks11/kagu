@@ -26,6 +26,16 @@ fn scratch() -> PathBuf {
 
 /// Run the stub's `probe` mode confined, with `request` as its prompt.
 fn probe(dir: &Path, network: &str, request: &Value, env: &[(&str, &str)]) -> Vec<Event> {
+    probe_with(dir, network, "", request, env)
+}
+
+fn probe_with(
+    dir: &Path,
+    network: &str,
+    grant_extra: &str,
+    request: &Value,
+    env: &[(&str, &str)],
+) -> Vec<Event> {
     let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
     let workspace = dir.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -33,7 +43,7 @@ fn probe(dir: &Path, network: &str, request: &Value, env: &[(&str, &str)]) -> Ve
     std::fs::write(
         &profile,
         format!(
-            "version = 1\n[grant]\nsubstrate = \"bwrap\"\nnetwork = {network:?}\n[worker]\ncommand = [{stub:?}, \"probe\"]\n"
+            "version = 1\n[grant]\nsubstrate = \"bwrap\"\nnetwork = {network:?}\n{grant_extra}\n[worker]\ncommand = [{stub:?}, \"probe\"]\n"
         ),
     )
     .unwrap();
@@ -110,11 +120,14 @@ fn a_confined_worker_reaches_only_its_grant() {
     assert_eq!(r["write_outside"], false, "{r}");
     assert_eq!(r["write_workspace"], true, "{r}");
     assert_eq!(r["env_leaked"], false, "{r}");
-    // Credentials are claimed enforced only where Landlock scopes abstract
-    // sockets; the claim must hold.
-    if a["levels"]["credentials"] == "enforced" {
-        assert_eq!(r["abstract_socket"], false, "{r}");
-    }
+    // Landlock alone forbids this: no mount hides /proc/self.
+    assert_eq!(r["write_proc_comm"], false, "{r}");
+    // These tests need a kernel with Landlock ABI 6 (Linux 6.12), where
+    // credentials are enforced by scoping abstract unix sockets.
+    assert_eq!(a["levels"]["credentials"], "enforced");
+    assert_eq!(r["abstract_socket"], false, "{r}");
+    // Positive control for the network-off test: here the network works.
+    assert_eq!(r["network"], true, "{r}");
     assert!(!outside.join("new").exists());
     assert!(dir.join("workspace/written-by-stub").exists());
     // The run ended, so its whole tree is gone.
@@ -132,5 +145,25 @@ fn network_off_is_enforced() {
     assert_eq!(a["levels"]["network"], "enforced");
     assert_eq!(a["levels"]["credentials"], "enforced");
     assert_eq!(report(&events)["network"], false);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[ignore = "needs user namespaces and a unix socket; run with `just test-integration`"]
+fn a_sandbox_that_cannot_start_is_rejected() {
+    let dir = scratch();
+    // bwrap refuses to bind a path that does not exist.
+    let extra = "ro = [\"/nonexistent/kagu-test\"]";
+    let request = json!({"abstract": "unused", "marker": "kagu-unused"});
+    let events = probe_with(&dir, "host", extra, &request, &[]);
+    let view = fold(&events).unwrap();
+    assert_eq!(view.state, Some(State::Rejected), "{events:#?}");
+    assert!(
+        !events.iter().any(|e| e.data["to"] == "working"),
+        "reached working"
+    );
+    let last = events.iter().rev().find(|e| e.kind == "run.state").unwrap();
+    let detail = last.data["detail"].as_str().unwrap();
+    assert!(detail.contains("the sandbox did not start"), "{detail}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

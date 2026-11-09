@@ -300,6 +300,46 @@ impl Actor<'_> {
         Ok(())
     }
 
+    /// Wait for `sandbox-init` to report the sandbox built. Until then the
+    /// worker has not started, so a failure here rejects the run.
+    fn await_sandbox(&mut self) -> Result<Result<(), String>, String> {
+        let deadline = Instant::now() + GRACE * 5;
+        let mut said = Vec::new();
+        loop {
+            let conn = self.worker.as_ref().expect("worker started");
+            let msg = conn.recv_until(deadline).map(|m| self.clean(m));
+            match msg {
+                Some(Msg::Raw {
+                    stream: "stderr",
+                    text,
+                }) if text == substrate::READY => {
+                    return Ok(Ok(()));
+                }
+                Some(Msg::Raw { stream, text }) => {
+                    said.push(text.clone());
+                    self.raw(stream, text)?;
+                }
+                Some(Msg::Exited(status)) => self.exit = Some(status),
+                Some(Msg::ErrClosed) => self.stderr_closed = true,
+                Some(Msg::Closed) => self.stdout_closed = true,
+                Some(Msg::Rpc(msg)) => self.raw_json(msg)?,
+                Some(Msg::Cancel) => {}
+                None => {
+                    let why = if said.is_empty() {
+                        "no report".to_string()
+                    } else {
+                        said.join("; ")
+                    };
+                    return Ok(Err(format!("the sandbox did not start: {why}")));
+                }
+            }
+            if self.exit.is_some() && self.stderr_closed {
+                let why = said.join("; ");
+                return Ok(Err(format!("the sandbox did not start: {why}")));
+            }
+        }
+    }
+
     fn fail(&mut self, err: CallError) -> Result<(), String> {
         if self.cancel_deadline.is_some() {
             return self.to(State::Canceled, None, None);
@@ -335,8 +375,8 @@ impl Actor<'_> {
             env.push((name.clone(), value));
         }
         let grant = &loaded.profile.grant;
-        let probe = (grant.substrate == Substrate::Bwrap).then(|| substrate::probe());
-        let levels = match substrate::levels(grant, probe) {
+        let probe = (grant.substrate == Substrate::Bwrap).then(substrate::probe);
+        let levels = match substrate::levels(grant, probe.as_ref()) {
             Ok(l) => l,
             Err(e) => return self.reject(e),
         };
@@ -356,7 +396,7 @@ impl Actor<'_> {
             },
         )?;
 
-        let mut command = match probe {
+        let mut command = match &probe {
             Some(Ok(probe)) => {
                 match substrate::command(probe, grant, &task.workspace, &worker.command, &env) {
                     Ok(c) => c,
@@ -387,6 +427,11 @@ impl Actor<'_> {
         *self.cancel.waker.lock().expect("waker lock") = Some(conn.waker());
         self.worker = Some(conn);
         self.log(Source::Host, &WorkerSpawned { pid })?;
+        if probe.is_some()
+            && let Err(e) = self.await_sandbox()?
+        {
+            return self.reject(e);
+        }
         self.to(State::Working, None, None)?;
 
         let init = json!({"protocolVersion": 1, "clientCapabilities": {}});
