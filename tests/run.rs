@@ -844,5 +844,53 @@ fn a_confined_grant_that_reaches_kagu_state_is_rejected() {
         let detail = last.data["detail"].as_str().unwrap();
         assert!(detail.contains("reaches kagu's state"), "{extra}: {detail}");
     }
+    // kagu auth refuses it too.
+    let p = profile(
+        &dir,
+        &format!(
+            "version = 1\n[grant]\nsubstrate = \"bwrap\"\nrw = [{:?}]\n[worker]\ncommand = [{stub:?}, \"auth\"]\nhome_env = [\"STUB_HOME\"]\n",
+            state.to_str().unwrap()
+        ),
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .arg("auth")
+        .arg(&p)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("reaches kagu's state"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_grant_spelled_through_links_or_dots_still_cannot_reach_kagu_state() {
+    let dir = scratch();
+    let real = dir.join("real");
+    std::fs::create_dir_all(real.join("kagu")).unwrap();
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::os::unix::fs::symlink(&real, dir.join("link")).unwrap();
+    std::os::unix::fs::symlink(real.join("kagu"), dir.join("tostate")).unwrap();
+    let grant = |path: &Path| kagu::profile::Grant {
+        substrate: kagu::profile::Substrate::Bwrap,
+        rw: vec![path.to_str().unwrap().to_string()],
+        ..Default::default()
+    };
+    let d = dir.to_str().unwrap().to_string();
+    for (state, path) in [
+        // XDG_STATE_HOME spelled through a link, the grant spelled the same.
+        (format!("{d}/link"), dir.join("link/kagu")),
+        // XDG_STATE_HOME through a link, the grant its real path.
+        (format!("{d}/link"), dir.join("real/kagu")),
+        (format!("{d}/real"), dir.join("other/../real/kagu")),
+        (format!("{d}/real"), dir.join("tostate")),
+    ] {
+        let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+        let err = kagu::profile::keep_out_of_state(&env, &grant(&path), None).unwrap_err();
+        assert!(err.contains("reaches kagu's state"), "{path:?}: {err}");
+    }
+    // A sibling is fine.
+    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| format!("{d}/real"));
+    kagu::profile::keep_out_of_state(&env, &grant(&dir.join("other")), None).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
