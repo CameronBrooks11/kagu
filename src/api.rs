@@ -47,7 +47,7 @@ pub struct Submit {
     pub thread: Option<String>,
 }
 
-/// Result of `task.submit`.
+/// Result of `task.submit` and `task.continue`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Submitted {

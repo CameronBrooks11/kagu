@@ -22,7 +22,7 @@
   "result": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Result of `task.submit`.",
+    "description": "Result of `task.submit` and `task.continue`.",
     "properties": {
       "run": {
         "type": "string"

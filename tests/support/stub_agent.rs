@@ -19,6 +19,15 @@ fn error(id: &Value, code: i64, message: &str) {
     send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}));
 }
 
+/// What claude-agent-acp sends after every session setup, before any prompt.
+fn commands() {
+    send(
+        json!({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "sessionId": "s1",
+        "update": {"sessionUpdate": "available_commands_update", "availableCommands": []}}}),
+    );
+}
+
 fn update(text: &str) {
     send(
         json!({"jsonrpc": "2.0", "method": "session/update", "params": {
@@ -116,6 +125,11 @@ fn main() {
             ("session/resume", _) => {
                 resumed = msg["params"]["sessionId"].as_str().map(str::to_string);
                 reply(&id, json!({}));
+                commands();
+            }
+            ("session/new", "prompt_auth" | "resumable") => {
+                reply(&id, json!({"sessionId": "s1"}));
+                commands();
             }
             ("session/new", "echo_new") => {
                 new_params = msg["params"].clone();

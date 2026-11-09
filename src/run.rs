@@ -387,16 +387,20 @@ impl Actor<'_> {
             Err(e) => return self.reject(e),
         };
         let worker = &loaded.profile.worker;
-        // A continuation resumes the earlier run's worker session.
-        // A continuation resumes its chain's session if a turn ever ran in it,
-        // as the log shows by worker output; a session no turn ran in holds
-        // nothing, and the harness may not know it, so it starts a new one.
+        // A continuation resumes its chain's session if a turn ever started in
+        // it, as the log shows by turn content (a message, thought, tool call
+        // or plan; not the notices an adapter sends on setup). A session no
+        // turn started in holds nothing, and the harness may not know it, so
+        // the continuation starts a new one.
         // A resume keeps the session id, so the whole chain shares it.
         let mut resume = None;
         let mut back = task.continues.clone();
         while let Some(prev) = back {
             let events = self.log.events(&prev)?;
-            if events.iter().any(|e| e.kind == WorkerUpdate::TYPE) {
+            if events
+                .iter()
+                .any(|e| e.kind == WorkerUpdate::TYPE && turn_content(&e.data))
+            {
                 resume = events
                     .iter()
                     .rev()
@@ -704,6 +708,22 @@ fn record(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
 /// Where credential references and the state directory are resolved: the
 /// host's environment.
 pub use crate::paths::Env;
+
+/// Whether a `session/update` is content of a turn, which exists only once
+/// the turn has started.
+fn turn_content(update: &Value) -> bool {
+    matches!(
+        update["sessionUpdate"].as_str(),
+        Some(
+            "user_message_chunk"
+                | "agent_message_chunk"
+                | "agent_thought_chunk"
+                | "tool_call"
+                | "tool_call_update"
+                | "plan"
+        )
+    )
+}
 
 /// Record a task that continues `prev` with `input`: the same profile and
 /// workspace, in the same thread, resuming `prev`'s worker session.

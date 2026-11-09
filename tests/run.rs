@@ -105,7 +105,11 @@ fn end_turn_completes_unverified() {
     ] {
         assert!(k.contains(&want), "missing {want} in {k:?}");
     }
-    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
     assert_eq!(update.data["sessionUpdate"], "agent_message_chunk");
     let raw = o.stored.iter().find(|e| e.kind == "worker.raw").unwrap();
     assert_eq!(raw.data["stream"], "stderr");
@@ -752,7 +756,11 @@ fn continue_resumes_the_earlier_session_in_its_thread() {
     assert_eq!(submitted["continues"], first.as_str());
     assert_eq!(submitted["thread"], first.as_str());
     assert_eq!(submitted["input"], "and then");
-    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
     assert_eq!(update.data["content"]["text"], "resumed s1");
     // A third run keeps the same thread.
     let third = run::continue_run(&log, &next, "more".into()).unwrap();
@@ -847,7 +855,11 @@ fn a_continuation_that_never_started_does_not_end_the_chain() {
         stored: log.events(&c).unwrap(),
     };
     expect(&o, State::Completed, None);
-    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
     assert_eq!(update.data["content"]["text"], "resumed s1");
     drop(log);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -875,7 +887,11 @@ fn a_session_no_turn_ran_in_is_not_resumed() {
         stored: log.events(&b).unwrap(),
     };
     expect(&o, State::Completed, None);
-    let update = o.stored.iter().find(|e| e.kind == "worker.update").unwrap();
+    let update = o
+        .stored
+        .iter()
+        .find(|e| e.kind == "worker.update" && e.data["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
     assert_eq!(update.data["content"]["text"], "resumed ");
     drop(log);
     std::fs::remove_dir_all(&dir).unwrap();
