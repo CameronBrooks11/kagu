@@ -530,3 +530,367 @@ fn a_read_only_path_over_the_workspace_is_rejected() {
     let detail = last.data["detail"].as_str().unwrap();
     assert!(detail.contains("contains the workspace"), "{detail}");
 }
+
+/// A stub profile with a harness home, named so its home is predictable.
+fn home_profile(dir: &Path, name: &str, mode: &str, worker_extra: &str) -> PathBuf {
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    let path = dir.join(format!("{name}.toml"));
+    std::fs::write(
+        &path,
+        format!(
+            "version = 1\n[grant]\nsubstrate = \"none\"\n[worker]\ncommand = [{stub:?}, {mode:?}]\nhome_env = [\"STUB_HOME\"]\n{worker_extra}"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// Run in-process with `state` as the host's XDG_STATE_HOME.
+fn run_with_state(dir: &Path, profile: &Path, state: &Path) -> Vec<Event> {
+    let log = Log::open(&dir.join("kagu.db")).unwrap();
+    let id = run::submit(&log, task(dir, profile)).unwrap();
+    let state = state.to_str().unwrap().to_string();
+    let lookup = move |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+    run::start(&log, &id, &Cancel::default(), &lookup).unwrap();
+    log.events(&id).unwrap()
+}
+
+/// `kagu auth` against `profile` with `state` as XDG_STATE_HOME.
+fn auth_cli(profile: &Path, state: &Path) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .args(["auth"])
+        .arg(profile)
+        .env("XDG_STATE_HOME", state)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The stub's report of what it found in its home.
+fn home_report(events: &[Event]) -> serde_json::Value {
+    let update = events.iter().find(|e| e.kind == "worker.update").unwrap();
+    serde_json::from_str(update.data["content"]["text"].as_str().unwrap()).unwrap()
+}
+
+const PIN: &str = "[worker.home_files]\n\"settings.json\" = \"{}\"\n";
+
+#[test]
+fn auth_signs_the_worker_in_to_its_own_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch();
+    let p = home_profile(&dir, "authstub", "auth", PIN);
+    // Before sign-in the worker asks for authentication.
+    let before = Outcome {
+        stored: run_with_state(&dir, &p, &dir.join("unsigned")),
+    };
+    expect(&before, State::Failed, Some(Reason::AuthRequired));
+    // Sign-in creates the home itself.
+    let state = dir.join("state");
+    auth_cli(&p, &state);
+    let home = state
+        .join("kagu/homes")
+        .join(kagu::profile::home_key(&p).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(home.join("credentials")).unwrap(),
+        "t0k"
+    );
+    let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    // After it, the same profile runs in that home.
+    let after = Outcome {
+        stored: run_with_state(&dir, &p, &state),
+    };
+    expect(&after, State::Completed, None);
+    let admitted = after
+        .stored
+        .iter()
+        .find(|e| e.kind == "run.admitted")
+        .unwrap();
+    assert_eq!(admitted.data["home"], home.to_str().unwrap());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn home_files_are_rewritten_before_every_run() {
+    let dir = scratch();
+    let state = dir.join("state");
+    let p = home_profile(&dir, "pinned", "auth", PIN);
+    auth_cli(&p, &state);
+    // Unconfined, the first run can plant over the file...
+    let first = run_with_state(&dir, &p, &state);
+    assert_eq!(home_report(&first)["settings"], "{}");
+    assert_eq!(home_report(&first)["planted"], true);
+    // ...but the next run starts from what the profile says.
+    let second = run_with_state(&dir, &p, &state);
+    assert_eq!(home_report(&second)["settings"], "{}");
+    // A link left in its place is replaced, not followed.
+    let home = state
+        .join("kagu/homes")
+        .join(kagu::profile::home_key(&p).unwrap());
+    let target = dir.join("target");
+    std::fs::write(&target, "keep").unwrap();
+    std::fs::remove_file(home.join("settings.json")).unwrap();
+    std::os::unix::fs::symlink(&target, home.join("settings.json")).unwrap();
+    let third = run_with_state(&dir, &p, &state);
+    assert_eq!(home_report(&third)["settings"], "{}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn profiles_with_one_file_name_get_different_homes() {
+    let dir = scratch();
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    let a = home_profile(&dir.join("a"), "same", "end_turn", "");
+    let b = home_profile(&dir.join("b"), "same", "end_turn", "");
+    let state = dir.join("state");
+    let home = |p: &Path| {
+        let events = run_with_state(&dir, p, &state);
+        let admitted = events.iter().find(|e| e.kind == "run.admitted").unwrap();
+        admitted.data["home"].as_str().unwrap().to_string()
+    };
+    assert_ne!(home(&a), home(&b));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_grant_that_makes_the_home_read_only_is_rejected() {
+    let dir = scratch();
+    let state = dir.join("state");
+    let ro = format!("[grant]\nro = [{:?}]\n", state.to_str().unwrap());
+    // home_profile writes its own [grant]; this one replaces it.
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    let p = dir.join("rohome.toml");
+    std::fs::write(
+        &p,
+        format!("version = 1\n{ro}substrate = \"none\"\n[worker]\ncommand = [{stub:?}, \"end_turn\"]\nhome_env = [\"STUB_HOME\"]\n"),
+    )
+    .unwrap();
+    let o = Outcome {
+        stored: run_with_state(&dir, &p, &state),
+    };
+    expect(&o, State::Rejected, Some(Reason::Error));
+    let last = o
+        .stored
+        .iter()
+        .rev()
+        .find(|e| e.kind == "run.state")
+        .unwrap();
+    assert!(
+        last.data["detail"]
+            .as_str()
+            .unwrap()
+            .contains("contains the harness home")
+    );
+    // kagu auth refuses it too.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .arg("auth")
+        .arg(&p)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("contains the harness home"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn system_prompt_and_meta_reach_the_worker() {
+    let dir = scratch();
+    let extra = "[worker.system_prompt]\nmode = \"append\"\ntext = \"be terse\"\n\
+                 [worker.meta.claudeCode.options]\nsettingSources = []\n";
+    let p = home_profile(&dir, "echo", "echo_new", extra);
+    let events = run_with_state(&dir, &p, &dir.join("state"));
+    let update = events.iter().find(|e| e.kind == "worker.update").unwrap();
+    let params: serde_json::Value =
+        serde_json::from_str(update.data["content"]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(params["systemPrompt"]["mode"], "append");
+    assert_eq!(params["systemPrompt"]["content"][0]["text"], "be terse");
+    assert_eq!(
+        params["_meta"]["claudeCode"]["options"]["settingSources"],
+        serde_json::json!([])
+    );
+    let admitted = events.iter().find(|e| e.kind == "run.admitted").unwrap();
+    assert_eq!(admitted.data["system_prompt"]["text"], "be terse");
+    assert_eq!(
+        admitted.data["meta"]["claudeCode"]["options"]["settingSources"],
+        serde_json::json!([])
+    );
+    for setting in ["system_prompt", "meta", "home_isolation"] {
+        assert_eq!(admitted.data["levels"][setting], "advisory", "{setting}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_example_claude_profile_loads() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/claude-code.toml");
+    let loaded = kagu::profile::load(&path).unwrap();
+    assert_eq!(loaded.profile.worker.home_env, ["CLAUDE_CONFIG_DIR"]);
+}
+
+/// A worker with one pinned file, and a grant with `substrate`.
+fn pinned(substrate: &str) -> (kagu::profile::Worker, kagu::profile::Grant) {
+    let p: kagu::profile::Profile = toml::from_str(&format!(
+        "version = 1\n[grant]\nsubstrate = {substrate:?}\n[worker]\ncommand = [\"x\"]\nhome_env = [\"H\"]\n[worker.home_files]\n\"settings.json\" = \"{{}}\"\n"
+    ))
+    .unwrap();
+    (p.worker, p.grant)
+}
+
+#[test]
+fn runs_of_one_profile_prepare_its_home_concurrently() {
+    let dir = scratch();
+    let profile = home_profile(&dir, "busy", "end_turn", "");
+    let state = dir.join("state").to_str().unwrap().to_string();
+    for substrate in ["none", "bwrap"] {
+        let (worker, grant) = pinned(substrate);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+                    for _ in 0..50 {
+                        kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+                    }
+                });
+            }
+        });
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn under_bwrap_a_pinned_file_in_the_home_is_never_replaced() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = scratch();
+    let profile = home_profile(&dir, "bound", "end_turn", "");
+    let state = dir.join("state").to_str().unwrap().to_string();
+    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+    let (worker, grant) = pinned("bwrap");
+    let home = kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    let dest = Path::new(&home.path).join("settings.json");
+    // Another run's bind may sit on this file: replacing it would detach it.
+    let inode = std::fs::metadata(&dest).unwrap().ino();
+    std::fs::write(&dest, "planted").unwrap();
+    let again = kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    assert_eq!(std::fs::metadata(&dest).unwrap().ino(), inode);
+    // What the run sees is the bind's source, which holds the pinned text.
+    let (source, target) = &again.pins[0];
+    assert_eq!(target, dest.to_str().unwrap());
+    assert_eq!(std::fs::read_to_string(source).unwrap(), "{}");
+    // A link in its place is replaced by a file, and its target untouched.
+    let outside = dir.join("outside");
+    std::fs::write(&outside, "keep").unwrap();
+    std::fs::remove_file(&dest).unwrap();
+    std::os::unix::fs::symlink(&outside, &dest).unwrap();
+    kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    assert!(
+        !std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_tampered_pin_source_is_rewritten() {
+    let dir = scratch();
+    let profile = home_profile(&dir, "tampered", "end_turn", "");
+    let state = dir.join("state").to_str().unwrap().to_string();
+    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+    let (worker, grant) = pinned("bwrap");
+    let first = kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    let source = first.pins[0].0.clone();
+    std::fs::write(&source, "planted").unwrap();
+    kagu::profile::prepare_home(&env, &profile, &worker, &grant).unwrap();
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), "{}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_confined_grant_that_reaches_kagu_state_is_rejected() {
+    let dir = scratch();
+    let state = dir.join("state");
+    let stub = env!("CARGO_BIN_EXE_kagu-stub-agent");
+    // Rejected before any sandbox is built, so this runs without bwrap.
+    for extra in [
+        format!("rw = [{:?}]", state.to_str().unwrap()),
+        format!("ro = [{:?}]", state.join("kagu/homes").to_str().unwrap()),
+        format!("rw = [{:?}]", dir.to_str().unwrap()),
+    ] {
+        let p = profile(
+            &dir,
+            &format!(
+                "version = 1\n[grant]\nsubstrate = \"bwrap\"\n{extra}\n[worker]\ncommand = [{stub:?}, \"end_turn\"]\n"
+            ),
+        );
+        let o = Outcome {
+            stored: run_with_state(&dir, &p, &state),
+        };
+        expect(&o, State::Rejected, Some(Reason::Error));
+        let last = o
+            .stored
+            .iter()
+            .rev()
+            .find(|e| e.kind == "run.state")
+            .unwrap();
+        let detail = last.data["detail"].as_str().unwrap();
+        assert!(detail.contains("reaches kagu's state"), "{extra}: {detail}");
+    }
+    // kagu auth refuses it too.
+    let p = profile(
+        &dir,
+        &format!(
+            "version = 1\n[grant]\nsubstrate = \"bwrap\"\nrw = [{:?}]\n[worker]\ncommand = [{stub:?}, \"auth\"]\nhome_env = [\"STUB_HOME\"]\n",
+            state.to_str().unwrap()
+        ),
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kagu"))
+        .arg("auth")
+        .arg(&p)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("reaches kagu's state"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_grant_spelled_through_links_or_dots_still_cannot_reach_kagu_state() {
+    let dir = scratch();
+    let real = dir.join("real");
+    std::fs::create_dir_all(real.join("kagu")).unwrap();
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::os::unix::fs::symlink(&real, dir.join("link")).unwrap();
+    std::os::unix::fs::symlink(real.join("kagu"), dir.join("tostate")).unwrap();
+    let grant = |path: &Path| kagu::profile::Grant {
+        substrate: kagu::profile::Substrate::Bwrap,
+        rw: vec![path.to_str().unwrap().to_string()],
+        ..Default::default()
+    };
+    let d = dir.to_str().unwrap().to_string();
+    for (state, path) in [
+        // XDG_STATE_HOME spelled through a link, the grant spelled the same.
+        (format!("{d}/link"), dir.join("link/kagu")),
+        // XDG_STATE_HOME through a link, the grant its real path.
+        (format!("{d}/link"), dir.join("real/kagu")),
+        (format!("{d}/real"), dir.join("other/../real/kagu")),
+        (format!("{d}/real"), dir.join("tostate")),
+    ] {
+        let env = |k: &str| (k == "XDG_STATE_HOME").then(|| state.clone());
+        let err = kagu::profile::keep_out_of_state(&env, &grant(&path), None).unwrap_err();
+        assert!(err.contains("reaches kagu's state"), "{path:?}: {err}");
+    }
+    // A sibling is fine.
+    let env = |k: &str| (k == "XDG_STATE_HOME").then(|| format!("{d}/real"));
+    kagu::profile::keep_out_of_state(&env, &grant(&dir.join("other")), None).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

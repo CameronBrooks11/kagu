@@ -180,6 +180,7 @@ pub fn command(
     workspace: &str,
     argv: &[String],
     env: &[(String, String)],
+    pins: &[(String, String)],
 ) -> Result<Command, String> {
     let exe = std::env::current_exe().map_err(|e| format!("kagu executable: {e}"))?;
     let program = resolve(&argv[0])?;
@@ -196,6 +197,13 @@ pub fn command(
         if Path::new(dir).exists() {
             c.args(["--ro-bind", dir, dir]);
         }
+    }
+    // DNS: where /etc/resolv.conf links out of /etc (systemd-resolved puts
+    // it under /run), mount its target too.
+    if let Ok(real) = std::fs::canonicalize("/etc/resolv.conf")
+        && !real.starts_with("/etc")
+    {
+        c.arg("--ro-bind").arg(&real).arg(&real);
     }
     for link in SYSTEM_LINKS {
         match std::fs::read_link(link) {
@@ -219,6 +227,9 @@ pub fn command(
     for p in &grant.ro {
         c.args(["--ro-bind", p, p]);
     }
+    for (source, dest) in pins {
+        c.args(["--ro-bind", source, dest]);
+    }
     c.args(["--dir", HOME, "--chdir", workspace]);
     // The environment is bwrap's own, which it passes on: cleared, then only
     // what the worker should see. Never arguments, which every user can read
@@ -241,6 +252,31 @@ pub fn command(
     }
     c.arg("--").arg(&program).args(&argv[1..]);
     Ok(c)
+}
+
+/// The command for `argv` under `grant`: confined when the grant's substrate
+/// was probed, otherwise run directly with a cleared environment.
+pub fn spawnable(
+    probe: Option<&Result<Probe, String>>,
+    grant: &Grant,
+    workspace: &str,
+    argv: &[String],
+    env: &[(String, String)],
+    pins: &[(String, String)],
+) -> Result<Command, String> {
+    match probe {
+        Some(Ok(probe)) => command(probe, grant, workspace, argv, env, pins),
+        Some(Err(e)) => Err(format!("substrate bwrap is unavailable: {e}")),
+        None => {
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..])
+                .current_dir(workspace)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .envs(env.iter().map(|(k, v)| (k, v)));
+            Ok(c)
+        }
+    }
 }
 
 /// The worker's executable as an absolute path, looked up on the host's

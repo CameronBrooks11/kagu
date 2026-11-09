@@ -5,7 +5,7 @@
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
@@ -93,6 +93,9 @@ struct Actor<'a> {
     session: Option<String>,
     /// Set once a cancel has been sent; the worker must stop by then.
     cancel_deadline: Option<Instant>,
+    /// Whether permission requests are answered "allow": only when the
+    /// filesystem level is `enforced`, so the sandbox is the boundary.
+    allow: bool,
     /// Which of the worker's output streams have ended.
     stdout_closed: bool,
     stderr_closed: bool,
@@ -281,10 +284,16 @@ impl Actor<'_> {
         };
         if method == "session/request_permission" {
             // Answered at once, so none is pending when a cancel arrives.
-            // No policy yet: refuse.
+            // Allowed inside an enforced sandbox, which is the real boundary;
+            // refused otherwise.
+            let kind = if self.allow {
+                "allow_once"
+            } else {
+                "reject_once"
+            };
             let option_id = options
                 .as_array()
-                .and_then(|opts| opts.iter().find(|o| o["kind"] == "reject_once"))
+                .and_then(|opts| opts.iter().find(|o| o["kind"] == kind))
                 .and_then(|o| o.get("optionId"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
@@ -369,7 +378,11 @@ impl Actor<'_> {
         if self.cancel.requested() {
             return self.to(State::Canceled, None, None);
         }
-        let loaded = match profile::resolve(&task.profile).and_then(|p| profile::load(&p)) {
+        let path = match profile::resolve(&task.profile) {
+            Ok(p) => p,
+            Err(e) => return self.reject(e),
+        };
+        let loaded = match profile::load(&path) {
             Ok(l) => l,
             Err(e) => return self.reject(e),
         };
@@ -385,7 +398,7 @@ impl Actor<'_> {
             }
             env.push((name.clone(), value));
         }
-        let grant = &loaded.profile.grant;
+        let mut grant = loaded.profile.grant.clone();
         if let Some(ro) = grant
             .ro
             .iter()
@@ -393,11 +406,45 @@ impl Actor<'_> {
         {
             return self.reject(format!("grant: ro path {ro:?} contains the workspace"));
         }
+        if let Err(e) = profile::keep_out_of_state(env_var, &grant, Some(&task.workspace)) {
+            return self.reject(e);
+        }
+        // The profile's harness home: its state, granted read-write and named
+        // by the variables the harness reads (spec: Harness home).
+        let mut pins = Vec::new();
+        let home = if worker.home_env.is_empty() {
+            None
+        } else {
+            let prepared = match profile::prepare_home(env_var, &path, worker, &grant) {
+                Ok(h) => h,
+                Err(e) => return self.reject(e),
+            };
+            let home = prepared.path;
+            for var in &worker.home_env {
+                env.push((var.clone(), home.clone()));
+            }
+            grant.rw.push(home.clone());
+            pins = prepared.pins;
+            Some(home)
+        };
+        let grant = &grant;
         let probe = (grant.substrate == Substrate::Bwrap).then(substrate::probe);
-        let levels = match substrate::levels(grant, probe.as_ref()) {
+        let mut levels = match substrate::levels(grant, probe.as_ref()) {
             Ok(l) => l,
             Err(e) => return self.reject(e),
         };
+        self.allow = levels.get("filesystem") == Some(&Level::Enforced);
+        // Worker settings: passed to the worker, not yet conformance-tested.
+        let advisory = [
+            ("system_prompt", worker.system_prompt.is_some()),
+            ("meta", worker.meta.is_some()),
+            ("home_isolation", home.is_some()),
+        ];
+        for (setting, present) in advisory {
+            if present {
+                levels.insert(setting.to_string(), Level::Advisory);
+            }
+        }
         self.log(
             Source::Host,
             &RunAdmitted {
@@ -411,25 +458,22 @@ impl Actor<'_> {
                     .unwrap_or_default(),
                 levels,
                 grant: grant.clone(),
+                home,
+                system_prompt: worker.system_prompt.clone(),
+                meta: worker.meta.clone(),
             },
         )?;
 
-        let mut command = match &probe {
-            Some(Ok(probe)) => {
-                match substrate::command(probe, grant, &task.workspace, &worker.command, &env) {
-                    Ok(c) => c,
-                    Err(e) => return self.reject(e),
-                }
-            }
-            _ => {
-                let mut c = Command::new(&worker.command[0]);
-                c.args(&worker.command[1..])
-                    .current_dir(&task.workspace)
-                    .env_clear()
-                    .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                    .envs(env);
-                c
-            }
+        let mut command = match substrate::spawnable(
+            probe.as_ref(),
+            grant,
+            &task.workspace,
+            &worker.command,
+            &env,
+            &pins,
+        ) {
+            Ok(c) => c,
+            Err(e) => return self.reject(e),
         };
         let spawned = command
             .stdin(Stdio::piped())
@@ -475,7 +519,14 @@ impl Actor<'_> {
             return self.to(State::Failed, Some(Reason::Error), Some(detail));
         }
 
-        let new = json!({"cwd": task.workspace, "mcpServers": []});
+        let mut new = json!({"cwd": task.workspace, "mcpServers": []});
+        if let Some(p) = &worker.system_prompt {
+            new["systemPrompt"] =
+                json!({"mode": p.mode, "content": [{"type": "text", "text": p.text}]});
+        }
+        if let Some(meta) = &worker.meta {
+            new["_meta"] = Value::Object(meta.clone());
+        }
         let session = match self.call("session/new", new)? {
             Ok(r) => r
                 .get("sessionId")
@@ -617,8 +668,9 @@ pub fn submit(log: &Log, mut task: TaskSubmitted) -> Result<String, String> {
     Ok(id)
 }
 
-/// Where credential references are resolved: the host's environment.
-pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+/// Where credential references and the state directory are resolved: the
+/// host's environment.
+pub use crate::paths::Env;
 
 /// Drive a submitted run to a terminal state. Runs on the run's own thread.
 pub fn start(log: &Log, id: &str, cancel: &Cancel, env_var: Env) -> Result<(), String> {
@@ -638,6 +690,7 @@ pub fn start(log: &Log, id: &str, cancel: &Cancel, env_var: Env) -> Result<(), S
         exit: None,
         session: None,
         cancel_deadline: None,
+        allow: false,
         stdout_closed: false,
         stderr_closed: false,
     };

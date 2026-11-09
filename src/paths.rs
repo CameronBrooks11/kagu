@@ -2,14 +2,25 @@
 
 use std::path::PathBuf;
 
-fn xdg(var: &str, fallback: &str) -> Result<PathBuf, String> {
-    match std::env::var_os(var).filter(|v| !v.is_empty()) {
+/// An environment lookup: the process's, or one a caller supplies.
+pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+fn process_env(var: &str) -> Option<String> {
+    std::env::var(var).ok()
+}
+
+fn xdg_with(env: Env, var: &str, fallback: &str) -> Result<PathBuf, String> {
+    match env(var).filter(|v| !v.is_empty()) {
         Some(dir) => Ok(PathBuf::from(dir)),
         None => {
-            let home = std::env::var_os("HOME").ok_or("HOME is unset")?;
+            let home = env("HOME").ok_or("HOME is unset")?;
             Ok(PathBuf::from(home).join(fallback))
         }
     }
+}
+
+fn xdg(var: &str, fallback: &str) -> Result<PathBuf, String> {
+    xdg_with(&process_env, var, fallback)
 }
 
 /// `$XDG_CONFIG_HOME/kagu`.
@@ -20,6 +31,26 @@ pub fn config() -> Result<PathBuf, String> {
 /// `$XDG_STATE_HOME/kagu`.
 pub fn state() -> Result<PathBuf, String> {
     Ok(xdg("XDG_STATE_HOME", ".local/state")?.join("kagu"))
+}
+
+/// `$XDG_STATE_HOME/kagu`, as `env` sees it.
+pub fn state_with(env: Env) -> Result<PathBuf, String> {
+    Ok(xdg_with(env, "XDG_STATE_HOME", ".local/state")?.join("kagu"))
+}
+
+/// `$XDG_STATE_HOME/kagu/homes/<profile>`: a profile's harness home.
+pub fn home(env: Env, profile: &str) -> Result<PathBuf, String> {
+    Ok(xdg_with(env, "XDG_STATE_HOME", ".local/state")?
+        .join("kagu")
+        .join("homes")
+        .join(profile))
+}
+
+/// `$XDG_STATE_HOME/kagu/pins`: pinned home files, by content digest.
+pub fn pins(env: Env) -> Result<PathBuf, String> {
+    Ok(xdg_with(env, "XDG_STATE_HOME", ".local/state")?
+        .join("kagu")
+        .join("pins"))
 }
 
 /// `$XDG_RUNTIME_DIR/kagu/kagu.sock`. There is no fallback: the runtime

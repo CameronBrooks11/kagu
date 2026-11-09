@@ -34,12 +34,22 @@ fn main() {
     if mode == "exit_at_start" {
         return;
     }
+    let home = std::env::var("STUB_HOME").unwrap_or_default();
+    if mode == "auth" && std::env::args().nth(2).as_deref() == Some("login") {
+        // The login method: the worker writes its own credential.
+        let token = std::env::var("STUB_TOKEN").unwrap_or_default();
+        std::fs::write(format!("{home}/credentials"), token).unwrap();
+        // A login that rewrites settings: confined, the pin stops it.
+        let _ = std::fs::write(format!("{home}/settings.json"), "planted");
+        return;
+    }
     if mode == "linger" {
         // A descendant that would outlive its run if nothing contained it.
         std::thread::sleep(std::time::Duration::from_secs(60));
         return;
     }
     let mut prompt_id = Value::Null;
+    let mut new_params = Value::Null;
     for line in std::io::stdin().lock().lines() {
         let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let id = msg["id"].clone();
@@ -63,6 +73,16 @@ fn main() {
                 std::mem::forget(_orphan);
                 return;
             }
+            ("initialize", "auth") => {
+                let terminal = msg["params"]["clientCapabilities"]["auth"]["terminal"] == true;
+                let methods = if terminal {
+                    json!([{"id": "stub-login", "name": "Stub login", "type": "terminal",
+                            "args": ["login"], "env": {"STUB_TOKEN": "t0k"}}])
+                } else {
+                    json!([])
+                };
+                reply(&id, json!({"protocolVersion": 1, "authMethods": methods}));
+            }
             ("initialize", _) => {
                 if mode == "bad_utf8" {
                     std::io::stderr().write_all(b"\xff\xfe bytes\n").unwrap();
@@ -84,6 +104,15 @@ fn main() {
             ("session/new", "new_error") => error(&id, -32603, "broken"),
             ("session/new", "no_session") => reply(&id, json!({})),
             ("session/new", "exit_in_new") => return,
+            ("session/new", "auth")
+                if !std::path::Path::new(&format!("{home}/credentials")).exists() =>
+            {
+                error(&id, -32000, "login required")
+            }
+            ("session/new", "echo_new") => {
+                new_params = msg["params"].clone();
+                reply(&id, json!({"sessionId": "s1"}));
+            }
             ("session/new", _) => {
                 let sid = if mode == "leak" {
                     secret.as_str()
@@ -134,6 +163,22 @@ fn main() {
                         update(&probe(&req).to_string());
                         reply(&id, json!({"stopReason": "end_turn"}));
                     }
+                    "auth" => {
+                        // Read the pinned file, then try to plant over it.
+                        let settings = format!("{home}/settings.json");
+                        let found = std::fs::read_to_string(&settings).ok();
+                        let planted = std::fs::write(&settings, "planted").is_ok();
+                        let transcript = std::fs::write(format!("{home}/transcript"), "t").is_ok();
+                        update(
+                            &json!({"settings": found, "planted": planted, "transcript": transcript})
+                                .to_string(),
+                        );
+                        reply(&id, json!({"stopReason": "end_turn"}));
+                    }
+                    "echo_new" => {
+                        update(&new_params.to_string());
+                        reply(&id, json!({"stopReason": "end_turn"}));
+                    }
                     "noise" => {
                         println!("not json");
                         reply(&id, json!({"stopReason": "end_turn"}));
@@ -157,7 +202,7 @@ fn main() {
                     stop => {
                         update("hello");
                         let reason = match stop {
-                            "" | "bad_utf8" => "end_turn",
+                            "" | "bad_utf8" | "auth" => "end_turn",
                             other => other,
                         };
                         reply(&id, json!({"stopReason": reason}));

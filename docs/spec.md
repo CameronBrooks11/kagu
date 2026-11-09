@@ -224,7 +224,23 @@ Each Profile owns a harness home: a directory the host creates and passes
 to the worker through the harness's state variables (`CLAUDE_CONFIG_DIR`;
 `CODEX_HOME`; OpenCode's `XDG_DATA_HOME` and `XDG_STATE_HOME`). It is
 granted read-write to every run of the profile and holds the harness's
-state: its login and transcripts.
+state: its login and transcripts. It lives at
+`$XDG_STATE_HOME/kagu/homes/<name>-<digest>`, mode 0700, where the digest is
+of the profile file's canonical path, so two profile files never share a
+home. Moving a profile file gives it a new, empty home: sign in again. The profile names the variables that point at it:
+
+```toml
+[worker]
+command = ["claude-agent-acp"]
+home_env = ["CLAUDE_CONFIG_DIR"]
+system_prompt = { mode = "append", text = "..." }   # ACP session/new systemPrompt
+
+[worker.meta.claudeCode.options]                   # the adapter's _meta, as is
+settingSources = []
+
+[worker.home_files]                                # pinned: read-only under bwrap
+"settings.json" = "{}"
+```
 
 The home is state, not configuration. A worker can write it, so whatever
 one run leaves there must not configure the next (invariant 5):
@@ -233,8 +249,19 @@ one run leaves there must not configure the next (invariant 5):
   servers), `session/set_mode`, `session/set_config_option`, the
   adapter's `_meta` options, or the environment. `run.admitted` records it.
 - The harness's own configuration sources in the home are not loaded (for
-  Claude Code, `settingSources` without `user`). A harness that cannot
-  exclude them gets the files kagu writes bound read-only over them.
+  Claude Code, `settingSources` without `user`). Where a harness reads one
+  regardless, the profile names it in `home_files`. Under bwrap kagu mounts
+  it read-only from a copy in its state
+  (`$XDG_STATE_HOME/kagu/pins/<digest>`), rewritten before every run, and
+  never replaces the file in the home, which would detach the mount of a run
+  already using it. Without a sandbox it rewrites the file atomically before
+  every run. A link in its place is replaced, never followed.
+  claude-agent-acp is such a harness: its settings manager reads
+  `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode` and
+  model limits) whatever `settingSources` says.
+- A confined run's workspace and grant paths may not reach kagu's own state
+  (`$XDG_STATE_HOME/kagu`: the event log, every home, the pins), in either
+  direction; kagu grants a run its own home and pins itself.
 - `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` and
   `TMPDIR` are a fresh tmpfs per run, so dotfiles a run writes (`.bashrc`,
   git config) are gone before the next.
@@ -404,7 +431,10 @@ restriction), the substrate is unavailable and runs that require it are
 
 ACP `session/request_permission` is advisory: the confined program decides
 whether to ask. kagu still answers, from policy first; only unresolved
-requests reach clients, and the first decision recorded wins.
+requests reach clients, and the first decision recorded wins. Until there is
+a policy engine the policy is fixed: allow (`allow_once`) when the run's
+filesystem level is `enforced`, since the sandbox is then the boundary, and
+refuse (`reject_once`) otherwise.
 
 ## Protocols
 
