@@ -17,9 +17,9 @@
 - **Wall time:** 24.4 s from `task.submitted` (00:17:10.510Z) to `completed` (00:17:34.895Z).
 - **Permission decisions:** none.
   - There is no `permission.decided` event.
-  - The session ran in the adapter's default `auto` mode, where Claude Code approves tool calls itself, so no request reached kagu.
-- **Every shell command failed.**
-  - Claude Code's Bash tool failed at seq 30: `bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)`.
+  - The log records no mode. The claude-agent-acp source starts a session in `auto` when no `defaultMode` is set, and in `auto` Claude Code approves tool calls itself. That explains why no request reached kagu.
+- **The one shell command failed.**
+  - Claude Code's only Bash call (seq 26 to 30) failed: `bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)`.
   - Its own sandbox was on because the host's managed settings in `/etc/claude-code` enable it with no unsandboxed fallback. kagu mounts `/etc` read-only, so the worker read that policy, and kagu's `--disable-userns` stopped the nested bwrap.
   - The worker wrote both files with its Write tool, seq 39 to 49, and never ran its script.
 
