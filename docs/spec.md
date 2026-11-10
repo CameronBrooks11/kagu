@@ -267,6 +267,9 @@ one run leaves there must not configure the next (invariant 5):
   never replaces the file in the home, which would detach the mount of a run
   already using it. Without a sandbox it rewrites the file atomically before
   every run. A link in its place is replaced, never followed.
+  Not yet closed (#25): the adapter also reads the workspace's
+  `.claude/settings{,.local}.json`, so a workspace file can still set the
+  session's permission mode.
   claude-agent-acp is such a harness: its settings manager reads
   `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode` and
   model limits) whatever `settingSources` says.

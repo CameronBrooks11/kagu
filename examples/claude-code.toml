@@ -25,9 +25,11 @@ settingSources = []
 
 # The adapter itself reads the home's settings.json whatever settingSources
 # says, so kagu pins it: read-only from kagu's own copy under bwrap. Mode
-# "default" sends every tool call to kagu as a permission request, which kagu
-# answers and records; without it the adapter starts in "auto", where Claude
-# Code approves tool calls itself.
+# "default" sends tool calls that need approval (shell commands, edits; not
+# read-only tools) to kagu as permission requests, which kagu answers and
+# records; without it the adapter starts in "auto", where Claude Code
+# approves them itself. Not yet closed (#25): a .claude/settings.local.json in
+# the workspace can set another mode.
 [worker.home_files]
 "settings.json" = '{"permissions":{"defaultMode":"default"}}'
 
