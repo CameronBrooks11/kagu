@@ -415,13 +415,14 @@ mod tests {
             hide: vec![p("conf"), p("file"), p("missing")],
             ..grant(Substrate::Bwrap, Network::Host)
         };
+        let pins = [(p("file"), p("conf/pinned"))];
         let c = command(
             &probe(6).unwrap(),
             &g,
             "/tmp",
             &["/bin/sh".into()],
             &[],
-            &[],
+            &pins,
         )
         .unwrap();
         let args: Vec<String> = c
@@ -432,10 +433,12 @@ mod tests {
         let ro = at(&["--ro-bind", &p(""), &p("")]).unwrap();
         let conf = at(&["--tmpfs", &p("conf")]).expect("directory covered by a tmpfs");
         let file = at(&["--ro-bind", "/dev/null", &p("file")]).expect("file covered by /dev/null");
+        let pin = at(&["--ro-bind", &p("file"), &p("conf/pinned")]).unwrap();
         assert!(
             ro < conf && ro < file,
             "hidden after the mounts they hide in"
         );
+        assert!(pin < conf && pin < file, "hidden after the pinned files");
         assert!(!args.contains(&p("missing")), "a missing path is skipped");
         std::fs::remove_dir_all(&dir).unwrap();
     }
