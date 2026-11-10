@@ -9,7 +9,7 @@ A new, empty git repository as the workspace, never one an earlier trial
 used:
 
 ```sh
-ws=$(mktemp -d ~/scratch/kagu-smoke-XXXX) && git -C "$ws" init -q && echo "$ws"
+mkdir -p ~/scratch && ws=$(mktemp -d ~/scratch/kagu-smoke-XXXX) && git -C "$ws" init -q && echo "$ws"
 ```
 
 ## Prompt
@@ -27,7 +27,7 @@ README.md that explains how to use it. Then run it on count.sh to check it.
 - The last `run.state` is `completed`.
 - `count.sh` and `README.md` exist in the workspace, and `sh count.sh count.sh` prints one line.
 - Every permission request reached kagu: at least one `permission.decided`, each answered `allow_once`, since the filesystem level is `enforced`.
-- No tool result reports that a shell or a sandbox failed to start, and at least one shell (Bash) tool call ends `completed`.
+- No tool result reports that a shell or a sandbox failed to start, and at least one shell call ends `completed`: a `worker.update` of kind `tool_call_update` whose `_meta.claudeCode.toolName` is `Bash` and whose `status` is `completed`.
 
 ## Record
 
