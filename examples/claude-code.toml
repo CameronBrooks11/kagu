@@ -24,13 +24,19 @@ home_env = ["CLAUDE_CONFIG_DIR"]
 settingSources = []
 
 # The adapter itself reads the home's settings.json whatever settingSources
-# says, so kagu pins it: read-only from kagu's own copy under bwrap.
+# says, so kagu pins it: read-only from kagu's own copy under bwrap. Mode
+# "default" sends every tool call to kagu as a permission request, which kagu
+# answers and records; without it the adapter starts in "auto", where Claude
+# Code approves tool calls itself.
 [worker.home_files]
-"settings.json" = "{}"
+"settings.json" = '{"permissions":{"defaultMode":"default"}}'
 
 [grant]
 substrate = "bwrap"
 network = "host"
+# Host-wide Claude Code policy would override the profile, and a sandbox it
+# turns on cannot start inside kagu's. kagu's sandbox is the boundary.
+hide = ["/etc/claude-code"]
 ro = [
   "/home/YOU/.local/share/fnm",                # Node
   "/home/YOU/.local/lib/claude-agent-acp",     # the adapter and Claude Code

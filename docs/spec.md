@@ -416,7 +416,15 @@ substrate = "bwrap"   # default; or "none"
 network = "host"      # default; or "off"
 ro = ["/abs/path"]    # extra read-only paths
 rw = ["/abs/path"]    # extra read-write paths
+hide = ["/abs/path"]  # host paths that look empty inside the sandbox
 ```
+
+`hide` is for host-wide harness configuration a run must not inherit, such
+as Claude Code's managed settings in `/etc/claude-code`, which the system
+mounts would otherwise expose and which override what a session passes. A
+directory gets an empty tmpfs and a file `/dev/null`, mounted after
+everything else. A grant without a sandbox cannot hide a path and is
+rejected.
 
 The network field takes one of three values:
 

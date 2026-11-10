@@ -32,6 +32,11 @@ pub struct Grant {
     /// Extra paths the worker may write, besides its workspace.
     #[serde(default)]
     pub rw: Vec<String>,
+    /// Host paths that look empty inside the sandbox: an empty tmpfs over a
+    /// directory, /dev/null over a file. For host-wide harness configuration
+    /// a run must not inherit, such as `/etc/claude-code`.
+    #[serde(default)]
+    pub hide: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -257,7 +262,13 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     if profile.worker.command.is_empty() {
         return Err("worker.command is empty".into());
     }
-    for path in profile.grant.ro.iter().chain(&profile.grant.rw) {
+    for path in profile
+        .grant
+        .ro
+        .iter()
+        .chain(&profile.grant.rw)
+        .chain(&profile.grant.hide)
+    {
         if !Path::new(path).is_absolute() {
             return Err(format!("grant path {path:?} is not absolute"));
         }

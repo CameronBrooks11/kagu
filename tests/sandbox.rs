@@ -272,3 +272,40 @@ fn the_home_is_writable_and_its_pinned_files_are_not() {
     drop(host);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+#[ignore = "needs user namespaces and a unix socket; run with `just test-integration`"]
+fn a_hidden_path_is_empty_inside_the_sandbox() {
+    let dir = scratch();
+    let shared = dir.join("shared");
+    std::fs::create_dir_all(shared.join("hidden")).unwrap();
+    std::fs::write(shared.join("hidden/secret"), "s").unwrap();
+    std::fs::write(shared.join("visible"), "v").unwrap();
+    let extra = format!(
+        "ro = [{:?}]\nhide = [{:?}]",
+        shared.to_str().unwrap(),
+        shared.join("hidden").to_str().unwrap()
+    );
+    let read = |path: &Path, sub: &str| {
+        let run_dir = dir.join(sub);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let request = json!({"outside": path, "abstract": "unused", "marker": "kagu-unused"});
+        let events = probe_with(&run_dir, "host", &extra, &request, &[]);
+        assert_eq!(
+            fold(&events).unwrap().state,
+            Some(State::Completed),
+            "{events:#?}"
+        );
+        report(&events)["read_outside"].as_bool().unwrap()
+    };
+    assert!(
+        !read(&shared.join("hidden/secret"), "a"),
+        "a hidden file was readable"
+    );
+    // Positive control: the rest of the ro grant is readable.
+    assert!(
+        read(&shared.join("visible"), "b"),
+        "the grant around it was not readable"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
