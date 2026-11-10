@@ -446,9 +446,9 @@ def capture(scenario, run_id, bench=BENCH, local=None):
     checklist = "\n".join(f"- [ ] {c}" for c in criteria(source.read_text()))
     (trial / "trial.md").write_text(
         f"# {trial.name}\n\n"
-        f"Scenario: [{source.stem}](../../scenarios/{source.name})  \n"
-        f"Run: `{run_id}`, final state `{env['final_state']}`  \n"
-        f"Canary occurrences in the raw log: {canary_seen}\n\n"
+        f"- Scenario: [{source.stem}](../../scenarios/{source.name})\n"
+        f"- Run: `{run_id}`, final state `{env['final_state']}`\n"
+        f"- Canary occurrences in the raw log: {canary_seen}\n\n"
         f"## Pass criteria\n\n{checklist}\n\n"
         "## Observations\n\n\n\n"
         "## Verdict\n\npass | fail | finding\n\n"

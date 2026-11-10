@@ -414,6 +414,7 @@ class Capture(unittest.TestCase):
         trial_md = (trial / "trial.md").read_text()
         self.assertIn("- [ ] it ran", trial_md)
         self.assertIn("Canary occurrences in the raw log: 2", trial_md)
+        self.assertFalse(any(line != line.rstrip() for line in trial_md.splitlines()), "trailing whitespace")
 
     def test_numbering_continues_after_a_deleted_trial(self):
         trials = self.root / "trials"
