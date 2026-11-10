@@ -123,6 +123,11 @@ pub fn levels(
                     "network \"off\" needs a sandbox; substrate \"none\" cannot enforce it".into(),
                 );
             }
+            if !grant.hide.is_empty() {
+                return Err(
+                    "grant.hide needs a sandbox; substrate \"none\" cannot hide a path".into(),
+                );
+            }
             Ok([
                 ("credentials", Level::Unsupported),
                 ("filesystem", Level::Unsupported),
@@ -229,6 +234,15 @@ pub fn command(
     }
     for (source, dest) in pins {
         c.args(["--ro-bind", source, dest]);
+    }
+    // Last, so no other mount re-exposes what is hidden.
+    for p in &grant.hide {
+        let path = Path::new(p);
+        if path.is_dir() {
+            c.args(["--tmpfs", p]);
+        } else if path.exists() {
+            c.args(["--ro-bind", "/dev/null", p]);
+        }
     }
     c.args(["--dir", HOME, "--chdir", workspace]);
     // The environment is bwrap's own, which it passes on: cleared, then only
@@ -361,7 +375,7 @@ pub fn sandbox_init(args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Probe, levels};
+    use super::{Probe, command, levels};
     use crate::event::Level;
     use crate::profile::{Grant, Network, Substrate};
 
@@ -391,8 +405,52 @@ mod tests {
     }
 
     #[test]
+    fn hidden_paths_are_covered_after_every_other_mount() {
+        let dir = std::env::temp_dir().join(format!("kagu-hide-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("conf")).unwrap();
+        std::fs::write(dir.join("file"), "x").unwrap();
+        let p = |name: &str| dir.join(name).to_str().unwrap().to_string();
+        let g = Grant {
+            ro: vec![p("")],
+            hide: vec![p("conf"), p("file"), p("missing")],
+            ..grant(Substrate::Bwrap, Network::Host)
+        };
+        let pins = [(p("file"), p("conf/pinned"))];
+        let c = command(
+            &probe(6).unwrap(),
+            &g,
+            "/tmp",
+            &["/bin/sh".into()],
+            &[],
+            &pins,
+        )
+        .unwrap();
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = |seq: &[&str]| args.windows(seq.len()).position(|w| w == seq);
+        let ro = at(&["--ro-bind", &p(""), &p("")]).unwrap();
+        let conf = at(&["--tmpfs", &p("conf")]).expect("directory covered by a tmpfs");
+        let file = at(&["--ro-bind", "/dev/null", &p("file")]).expect("file covered by /dev/null");
+        let pin = at(&["--ro-bind", &p("file"), &p("conf/pinned")]).unwrap();
+        assert!(
+            ro < conf && ro < file,
+            "hidden after the mounts they hide in"
+        );
+        assert!(pin < conf && pin < file, "hidden after the pinned files");
+        assert!(!args.contains(&p("missing")), "a missing path is skipped");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_restriction_nothing_can_enforce_is_rejected() {
         assert!(levels(&grant(Substrate::None, Network::Off), None).is_err());
+        let hide = Grant {
+            hide: vec!["/etc/claude-code".into()],
+            ..grant(Substrate::None, Network::Host)
+        };
+        assert!(levels(&hide, None).unwrap_err().contains("grant.hide"));
         let unavailable = Err("no user namespaces".to_string());
         let err = levels(&grant(Substrate::Bwrap, Network::Host), Some(&unavailable)).unwrap_err();
         assert!(err.contains("no user namespaces"), "{err}");

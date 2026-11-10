@@ -267,6 +267,9 @@ one run leaves there must not configure the next (invariant 5):
   never replaces the file in the home, which would detach the mount of a run
   already using it. Without a sandbox it rewrites the file atomically before
   every run. A link in its place is replaced, never followed.
+  Not yet closed (#25): the adapter also reads the workspace's
+  `.claude/settings{,.local}.json`, so a workspace file can still set the
+  session's permission mode.
   claude-agent-acp is such a harness: its settings manager reads
   `$CLAUDE_CONFIG_DIR/settings.json` (for `permissions.defaultMode` and
   model limits) whatever `settingSources` says.
@@ -416,7 +419,15 @@ substrate = "bwrap"   # default; or "none"
 network = "host"      # default; or "off"
 ro = ["/abs/path"]    # extra read-only paths
 rw = ["/abs/path"]    # extra read-write paths
+hide = ["/abs/path"]  # host paths that look empty inside the sandbox
 ```
+
+`hide` is for host-wide harness configuration a run must not inherit, such
+as Claude Code's managed settings in `/etc/claude-code`, which the system
+mounts would otherwise expose and which override what a session passes. A
+directory gets an empty tmpfs and a file `/dev/null`, mounted after
+everything else. A grant without a sandbox cannot hide a path and is
+rejected.
 
 The network field takes one of three values:
 

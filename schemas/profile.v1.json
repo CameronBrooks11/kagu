@@ -4,6 +4,14 @@
       "additionalProperties": false,
       "description": "What a run's worker may reach (spec: Grant).",
       "properties": {
+        "hide": {
+          "default": [],
+          "description": "Host paths that look empty inside the sandbox: an empty tmpfs over a\ndirectory, /dev/null over a file. For host-wide harness configuration\na run must not inherit, such as `/etc/claude-code`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "network": {
           "$ref": "#/$defs/Network",
           "default": "host"
@@ -150,6 +158,7 @@
     "grant": {
       "$ref": "#/$defs/Grant",
       "default": {
+        "hide": [],
         "network": "host",
         "ro": [],
         "rw": [],
