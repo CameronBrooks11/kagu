@@ -25,6 +25,8 @@ README.md that explains how to use it.
 - `worker.initialized` has an `agent_info` that names claude-agent-acp and its version.
 - The last `run.state` is `completed`.
 - `count.sh` and `README.md` exist in the workspace, and `sh count.sh count.sh` prints one line.
+- Every permission request reached kagu: at least one `permission.decided`, each answered `allow_once`, since the filesystem level is `enforced`.
+- No tool result reports that a shell or a sandbox failed to start.
 
 ## Record
 
