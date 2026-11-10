@@ -5,10 +5,11 @@ end `completed` with the levels kagu claims?
 
 ## Setup
 
-A fresh git repository as the workspace:
+A new, empty git repository as the workspace, never one an earlier trial
+used:
 
 ```sh
-mkdir -p ~/scratch/kagu-smoke && git -C ~/scratch/kagu-smoke init
+ws=$(mktemp -d ~/scratch/kagu-smoke-XXXX) && git -C "$ws" init -q && echo "$ws"
 ```
 
 ## Prompt
@@ -16,7 +17,7 @@ mkdir -p ~/scratch/kagu-smoke && git -C ~/scratch/kagu-smoke init
 ```text
 Write a POSIX shell script count.sh that prints the number of lines in each
 file given as an argument, one "name: count" line per file, and a short
-README.md that explains how to use it.
+README.md that explains how to use it. Then run it on count.sh to check it.
 ```
 
 ## Pass criteria
@@ -26,7 +27,7 @@ README.md that explains how to use it.
 - The last `run.state` is `completed`.
 - `count.sh` and `README.md` exist in the workspace, and `sh count.sh count.sh` prints one line.
 - Every permission request reached kagu: at least one `permission.decided`, each answered `allow_once`, since the filesystem level is `enforced`.
-- No tool result reports that a shell or a sandbox failed to start.
+- No tool result reports that a shell or a sandbox failed to start, and at least one shell (Bash) tool call ends `completed`.
 
 ## Record
 
